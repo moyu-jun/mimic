@@ -1,5 +1,27 @@
 # CLAUDE.md
 
+## 项目速览
+
+Mimic 是一款**仅面向 Windows** 的桌面按键/鼠标模拟工具，主要用于游戏场景。用户在界面配置按键序列、点击坐标与全局热键，按启动热键后由后台循环执行模拟，按停止热键退出；并支持热键提示音与自定义提示音录制。底层模拟通过第三方 **Interception** 驱动完成。
+
+- **技术栈**：前端 Vue 3 + TypeScript + Vite；桌面运行时 Tauri 2；后端 Rust；底层 Interception 驱动。
+- **平台约束**：Windows only；模拟功能依赖 Interception 驱动（未安装/未重启时不可用，但界面必须能正常打开）。采用「按需提权」：启动不主动请求 UAC，仅安装/卸载驱动时引导提权。
+- **代码位置**：前端在 `src/`，Rust 后端在 `src-tauri/src/`，运行期外置资源（`interception.dll`、`audio/`、`driver/`）在 `extra/`，由 `build.rs` 编译时复制到 `target/{debug,release}/`。
+
+**构建与检查命令**：
+
+```bash
+npm run tauri dev          # 开发运行（会自动起 vite）
+npm run tauri build        # 打包
+npm run build              # 前端类型检查 + 构建（= vue-tsc --noEmit && vite build）
+
+# 后端（在 src-tauri/ 目录下）
+cargo fmt                  # 格式化
+cargo clippy -- -D warnings
+cargo check
+cargo build
+```
+
 ## 1. 编码前先思考
 
 **不要假设。不要隐藏困惑。明确权衡。**
@@ -56,19 +78,28 @@
 
 强有力的成功标准让你能够独立循环。弱标准（"让它工作"）需要持续澄清。
 
+**本项目的验证方式**：本项目主体是 GUI + 驱动交互代码，`src-tauri` 目前没有单元测试，历史各阶段均以**静态检查 + 实机验收**收口。因此默认验证手段为：
+
+- 后端：`cargo fmt`（无 diff）、`cargo clippy -- -D warnings`、`cargo check` / `cargo build` 通过。
+- 前端：`npm run build`（含 `vue-tsc` 类型检查）通过。
+- 涉及运行时行为（热键、模拟、提示音延迟、驱动状态）的改动，需**实机运行验收**，并在响应中说清哪些已实测、哪些待实机复核。
+
+仅当改动引入**可独立自动化的纯逻辑**（如配置解析、坐标/波形计算）时才补单元测试；不要为 GUI 或驱动交互代码硬造测试脚手架。
+
 ## 5. 项目文档
 
-实施任何编码任务前，必须先对照以下三份文档；三者内容冲突时**以 REQUIREMENTS 为准**，并同步更新另外两份。
+**第一阶段需求目标已全部完成**，`docs/` 下四份文档现作为**第一阶段归档参考**，不再作为待执行的任务清单：
 
 - [docs/REQUIREMENTS.md](docs/REQUIREMENTS.md) — 功能需求、用户行为约束、边界条件、默认配置。
 - [docs/DESIGN.md](docs/DESIGN.md) — 技术选型、模块划分、命令/事件协议、数据结构、线程模型。
-- [docs/TASKS.md](docs/TASKS.md) — 实施顺序、阶段验收标准、待确认事项跟踪。
-- [docs/CHANGELOG.md](docs/CHANGELOG.md) — 阶段执行日志，记录每个阶段实际改动摘要、关键决策、验证结果、文档回写与偏差遗留。
+- [docs/TASKS.md](docs/TASKS.md) — 第一阶段实施顺序与阶段验收记录（已全部完成）。
+- [docs/CHANGELOG.md](docs/CHANGELOG.md) — 第一阶段各阶段执行日志。
 
-对应使用方式：
-- 接到新需求 → 先读 REQUIREMENTS 对齐意图，必要时回写。
-- 决定怎么做 → 查 DESIGN 现有约定，新增/调整设计需同步落到 DESIGN。
-- 决定先做什么 → 按 TASKS 当前阶段推进；阶段验收点是该次提交的成功标准，任务完成后需要标记进度。
-- 完成一个阶段 → **追加**一节到 CHANGELOG，遵循其文件顶部的章节模板；不修改历史阶段记录。
+**如何使用归档文档**：
+- 要理解某项功能「为什么这么做 / 现有约定是什么」→ 查 REQUIREMENTS / DESIGN。
+- 要追溯某处实现的历史决策与偏差 → 查 CHANGELOG。
+- 归档文档描述的是第一阶段完工时的状态；**代码是最终事实来源**，若文档与代码不符以代码为准，并向用户指出该出入。
 
-**注意事项**：任务执行时，**必须**按照 TASKS 依次执行，且每次只允许执行一个阶段的任务，待验证无误后才能开始下一个阶段，**切忌**多个任务并行执行。每阶段完成后必须同步更新 CHANGELOG。
+**维护期的零散改动**（bug 修复、小迭代）：直接修改代码并按 §4 验证即可，无需走阶段流程；如果改动使某份归档文档失真，顺手同步更正对应条目。
+
+**下一阶段需求**：当进入新一轮成规模的需求时，**重新建立该阶段自己的文档集**（REQUIREMENTS / DESIGN / TASKS / CHANGELOG），不要在第一阶段归档上继续追加阶段。届时冲突以新阶段 REQUIREMENTS 为准，并保持三份文档同步回写。
