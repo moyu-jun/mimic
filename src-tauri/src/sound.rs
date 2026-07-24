@@ -19,9 +19,8 @@ mod inner {
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex, OnceLock};
     use windows_sys::Win32::Media::Audio::{
-        waveOutClose, waveOutOpen, waveOutPrepareHeader, waveOutReset,
-        waveOutUnprepareHeader, waveOutWrite, CALLBACK_NULL, HWAVEOUT, WAVEHDR,
-        WAVEFORMATEX, WAVE_FORMAT_PCM, WAVE_MAPPER,
+        waveOutClose, waveOutOpen, waveOutPrepareHeader, waveOutReset, waveOutUnprepareHeader,
+        waveOutWrite, CALLBACK_NULL, HWAVEOUT, WAVEFORMATEX, WAVEHDR, WAVE_FORMAT_PCM, WAVE_MAPPER,
     };
 
     pub const FILE_START: &str = "按键开启.wav";
@@ -97,12 +96,9 @@ mod inner {
         let mut pos = 12;
         while pos + 8 <= raw.len() {
             let chunk_id = &raw[pos..pos + 4];
-            let chunk_size = u32::from_le_bytes([
-                raw[pos + 4],
-                raw[pos + 5],
-                raw[pos + 6],
-                raw[pos + 7],
-            ]) as usize;
+            let chunk_size =
+                u32::from_le_bytes([raw[pos + 4], raw[pos + 5], raw[pos + 6], raw[pos + 7]])
+                    as usize;
             if chunk_id == b"fmt " && chunk_size >= 16 {
                 let fmt_tag = u16::from_le_bytes([raw[pos + 8], raw[pos + 9]]);
                 if fmt_tag != 1 {
@@ -154,16 +150,7 @@ mod inner {
             cbSize: 0,
         };
         let mut handle: HWAVEOUT = std::ptr::null_mut();
-        let result = unsafe {
-            waveOutOpen(
-                &mut handle,
-                WAVE_MAPPER,
-                &fmt,
-                0,
-                0,
-                CALLBACK_NULL,
-            )
-        };
+        let result = unsafe { waveOutOpen(&mut handle, WAVE_MAPPER, &fmt, 0, 0, CALLBACK_NULL) };
         if result == 0 {
             log::info!(
                 "[sound] waveOut opened: {}ch {}Hz {}bit",
@@ -200,7 +187,10 @@ mod inner {
             log::error!("[sound] waveOutPrepareHeader failed: {}", result);
             return None;
         }
-        Some(PreparedBuf { hdr, _pcm: pcm_data })
+        Some(PreparedBuf {
+            hdr,
+            _pcm: pcm_data,
+        })
     }
 
     fn unprepare_buf(handle: HWAVEOUT, buf: &mut PreparedBuf) {
@@ -241,14 +231,12 @@ mod inner {
 
         // 用第一个文件的格式打开设备
         let first = &files[0].2;
-        let handle = match open_device_with_format(
-            first.channels,
-            first.sample_rate,
-            first.bits_per_sample,
-        ) {
-            Some(h) => h,
-            None => return,
-        };
+        let handle =
+            match open_device_with_format(first.channels, first.sample_rate, first.bits_per_sample)
+            {
+                Some(h) => h,
+                None => return,
+            };
 
         let device_format = (first.channels, first.sample_rate, first.bits_per_sample);
         let mut bufs = HashMap::new();
@@ -324,7 +312,9 @@ mod inner {
             None => return,
         };
         // 停止播放后卸载旧缓冲
-        unsafe { waveOutReset(dev.handle); }
+        unsafe {
+            waveOutReset(dev.handle);
+        }
         if let Some(mut old) = dev.bufs.remove(file_name) {
             unprepare_buf(dev.handle, &mut old);
         }
@@ -349,7 +339,9 @@ mod inner {
             for (_, mut buf) in dev.bufs.drain() {
                 unprepare_buf(dev.handle, &mut buf);
             }
-            unsafe { waveOutClose(dev.handle); }
+            unsafe {
+                waveOutClose(dev.handle);
+            }
             match open_device_with_format(info.channels, info.sample_rate, info.bits_per_sample) {
                 Some(h) => {
                     dev.handle = h;
@@ -362,7 +354,11 @@ mod inner {
                 }
             }
             // 重新加载另一个文件（如果存在且格式匹配）
-            let other = if file_name == FILE_START { FILE_STOP } else { FILE_START };
+            let other = if file_name == FILE_START {
+                FILE_STOP
+            } else {
+                FILE_START
+            };
             if let Some(buf) = load_single(dev.handle, other) {
                 dev.bufs.insert(other, buf);
             }
@@ -383,7 +379,9 @@ mod inner {
             Err(_) => return,
         };
         if let Some(dev) = guard.as_ref() {
-            unsafe { waveOutReset(dev.handle); }
+            unsafe {
+                waveOutReset(dev.handle);
+            }
         }
     }
 

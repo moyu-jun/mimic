@@ -24,13 +24,19 @@ fn copy_extra_to_target() {
     }
 
     if !target_dir.exists() {
-        println!("cargo:warning=target/{} directory not found, skipping copy", profile);
+        println!(
+            "cargo:warning=target/{} directory not found, skipping copy",
+            profile
+        );
         return;
     }
 
     // 递归复制 extra/ 的所有内容到 target/{profile}/
     if let Err(e) = copy_dir_all(&extra_dir, &target_dir) {
-        println!("cargo:warning=Failed to copy extra/ to target/{}: {}", profile, e);
+        println!(
+            "cargo:warning=Failed to copy extra/ to target/{}: {}",
+            profile, e
+        );
     } else {
         println!("cargo:warning=Copied extra/ to target/{}", profile);
     }

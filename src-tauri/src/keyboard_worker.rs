@@ -109,7 +109,10 @@ pub fn start_keyboard_worker(
 
             // 转换 u16 scan_code 为 ScanCode 枚举
             let code = ScanCode::try_from(scan_code).unwrap_or_else(|_| {
-                warn!("[keyboard_worker] invalid scan_code {}, using Esc", scan_code);
+                warn!(
+                    "[keyboard_worker] invalid scan_code {}, using Esc",
+                    scan_code
+                );
                 ScanCode::Esc
             });
 

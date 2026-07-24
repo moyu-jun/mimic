@@ -96,7 +96,10 @@ fn emit_status(app: &AppHandle, status: RuntimeStatus) {
         "runtime_status_changed",
         serde_json::json!({ "status": status }),
     ) {
-        log::error!("[mouse_picker] failed to emit runtime_status_changed: {}", e);
+        log::error!(
+            "[mouse_picker] failed to emit runtime_status_changed: {}",
+            e
+        );
     }
 }
 
@@ -106,23 +109,21 @@ fn emit_status(app: &AppHandle, status: RuntimeStatus) {
 /// 不可靠，必须 marshal 回主线程执行。
 fn restore_window_on_main(app: &AppHandle) {
     let app_clone = app.clone();
-    let dispatched = app.run_on_main_thread(move || {
-        match app_clone.get_webview_window("main") {
-            Some(win) => {
-                if let Err(e) = win.unminimize() {
-                    log::warn!("[mouse_picker] unminimize failed: {}", e);
-                }
-                if let Err(e) = win.show() {
-                    log::error!("[mouse_picker] window show failed: {}", e);
-                }
-                if let Err(e) = win.set_focus() {
-                    log::warn!("[mouse_picker] set_focus failed: {}", e);
-                }
-                log::info!("[mouse_picker] window restored on main thread");
+    let dispatched = app.run_on_main_thread(move || match app_clone.get_webview_window("main") {
+        Some(win) => {
+            if let Err(e) = win.unminimize() {
+                log::warn!("[mouse_picker] unminimize failed: {}", e);
             }
-            None => {
-                log::error!("[mouse_picker] main window not found during restore");
+            if let Err(e) = win.show() {
+                log::error!("[mouse_picker] window show failed: {}", e);
             }
+            if let Err(e) = win.set_focus() {
+                log::warn!("[mouse_picker] set_focus failed: {}", e);
+            }
+            log::info!("[mouse_picker] window restored on main thread");
+        }
+        None => {
+            log::error!("[mouse_picker] main window not found during restore");
         }
     });
     if let Err(e) = dispatched {

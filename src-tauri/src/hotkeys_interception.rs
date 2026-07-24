@@ -27,7 +27,10 @@ pub fn start_hotkey_listener(
             let ctx_guard = match ctx.lock() {
                 Ok(g) => g,
                 Err(e) => {
-                    error!("[hotkeys_interception] failed to lock context for filter: {}", e);
+                    error!(
+                        "[hotkeys_interception] failed to lock context for filter: {}",
+                        e
+                    );
                     return;
                 }
             };
@@ -320,12 +323,17 @@ fn handle_start_keyboard(app: &AppHandle, state: &SharedState) {
         let mut app_state = match state.lock() {
             Ok(s) => s,
             Err(e) => {
-                error!("[hotkeys_interception] start_keyboard: failed to lock state: {}", e);
+                error!(
+                    "[hotkeys_interception] start_keyboard: failed to lock state: {}",
+                    e
+                );
                 return;
             }
         };
         app_state.runtime_status = new_status.clone();
-        app_state.stop_flag.store(false, std::sync::atomic::Ordering::Relaxed);
+        app_state
+            .stop_flag
+            .store(false, std::sync::atomic::Ordering::Relaxed);
         let selected = app_state
             .config
             .keyboard_actions
@@ -333,7 +341,11 @@ fn handle_start_keyboard(app: &AppHandle, state: &SharedState) {
             .filter(|a| a.selected)
             .cloned()
             .collect::<Vec<_>>();
-        (selected, app_state.action_tx.clone(), app_state.stop_flag.clone())
+        (
+            selected,
+            app_state.action_tx.clone(),
+            app_state.stop_flag.clone(),
+        )
     };
 
     // 启动提示音 — 仅在确实有勾选动作（真正进入循环）时播放；
@@ -343,8 +355,14 @@ fn handle_start_keyboard(app: &AppHandle, state: &SharedState) {
         crate::sound::play_start();
     }
 
-    if let Err(e) = app.emit("runtime_status_changed", serde_json::json!({ "status": new_status })) {
-        error!("[hotkeys_interception] failed to emit runtime_status_changed: {}", e);
+    if let Err(e) = app.emit(
+        "runtime_status_changed",
+        serde_json::json!({ "status": new_status }),
+    ) {
+        error!(
+            "[hotkeys_interception] failed to emit runtime_status_changed: {}",
+            e
+        );
     }
 
     let app_clone = app.clone();
@@ -357,8 +375,13 @@ fn handle_start_keyboard(app: &AppHandle, state: &SharedState) {
 
         if selected_actions.is_empty() {
             info!("[hotkeys_interception] no selected keyboard actions, stopping immediately");
-            if let Ok(mut s) = state_clone.lock() { s.runtime_status = RuntimeStatus::Idle; }
-            let _ = app_clone.emit("runtime_status_changed", serde_json::json!({ "status": RuntimeStatus::Idle }));
+            if let Ok(mut s) = state_clone.lock() {
+                s.runtime_status = RuntimeStatus::Idle;
+            }
+            let _ = app_clone.emit(
+                "runtime_status_changed",
+                serde_json::json!({ "status": RuntimeStatus::Idle }),
+            );
             return;
         }
 
@@ -367,18 +390,24 @@ fn handle_start_keyboard(app: &AppHandle, state: &SharedState) {
                 macro_rules! check_stop {
                     () => {
                         if stop_flag.load(std::sync::atomic::Ordering::Relaxed) {
-                            info!("[hotkeys_interception] stop_flag detected, exiting keyboard loop");
+                            info!(
+                                "[hotkeys_interception] stop_flag detected, exiting keyboard loop"
+                            );
                             return;
                         }
                     };
                 }
                 check_stop!();
-                if let Err(e) = action_tx.send(crate::keyboard_worker::ActionEvent::KeyPress { scan_code: action.scan_code }) {
+                if let Err(e) = action_tx.send(crate::keyboard_worker::ActionEvent::KeyPress {
+                    scan_code: action.scan_code,
+                }) {
                     error!("[hotkeys_interception] failed to send KeyPress: {}", e);
                     return;
                 }
                 check_stop!();
-                if let Err(e) = action_tx.send(crate::keyboard_worker::ActionEvent::KeyRelease { scan_code: action.scan_code }) {
+                if let Err(e) = action_tx.send(crate::keyboard_worker::ActionEvent::KeyRelease {
+                    scan_code: action.scan_code,
+                }) {
                     error!("[hotkeys_interception] failed to send KeyRelease: {}", e);
                     return;
                 }
@@ -399,7 +428,10 @@ fn handle_start_mouse(app: &AppHandle, state: &SharedState) {
         let app_state = match state.lock() {
             Ok(s) => s,
             Err(e) => {
-                error!("[hotkeys_interception] start_mouse: failed to lock state: {}", e);
+                error!(
+                    "[hotkeys_interception] start_mouse: failed to lock state: {}",
+                    e
+                );
                 return;
             }
         };
@@ -430,7 +462,10 @@ fn handle_start_mouse(app: &AppHandle, state: &SharedState) {
         let mut app_state = match state.lock() {
             Ok(s) => s,
             Err(e) => {
-                error!("[hotkeys_interception] start_mouse: failed to lock state: {}", e);
+                error!(
+                    "[hotkeys_interception] start_mouse: failed to lock state: {}",
+                    e
+                );
                 return;
             }
         };
@@ -473,9 +508,7 @@ fn handle_start_mouse(app: &AppHandle, state: &SharedState) {
                 }
                 let (x, y) = (action.x.unwrap(), action.y.unwrap());
                 check_stop!();
-                if let Err(e) =
-                    mouse_tx.send(crate::mouse_worker::MouseEvent::Click { x, y })
-                {
+                if let Err(e) = mouse_tx.send(crate::mouse_worker::MouseEvent::Click { x, y }) {
                     error!("[hotkeys_interception] failed to send MouseClick: {}", e);
                     return;
                 }

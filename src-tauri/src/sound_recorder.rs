@@ -283,10 +283,7 @@ fn run_recording_thread(
 /// 将 i16 PCM 数组编码为 base64（用于前端 Web Audio）。
 fn samples_to_base64(samples: &[i16]) -> String {
     use base64::{engine::general_purpose::STANDARD, Engine};
-    let bytes: Vec<u8> = samples
-        .iter()
-        .flat_map(|s| s.to_le_bytes())
-        .collect();
+    let bytes: Vec<u8> = samples.iter().flat_map(|s| s.to_le_bytes()).collect();
     STANDARD.encode(&bytes)
 }
 
@@ -436,7 +433,11 @@ fn build_input_stream(
 }
 
 /// 写 16-bit mono PCM WAV：先写 .tmp 再原子 rename。
-fn write_wav(final_path: &std::path::Path, samples: &[i16], sample_rate: u32) -> Result<(), String> {
+fn write_wav(
+    final_path: &std::path::Path,
+    samples: &[i16],
+    sample_rate: u32,
+) -> Result<(), String> {
     let tmp_path = final_path.with_extension("wav.tmp");
     let spec = hound::WavSpec {
         channels: 1,
