@@ -57,15 +57,16 @@ mimic/
 
 ## 架构
 
-后端已完成两轮重构（均已实施并校验）：
+后端已完成两轮重构（模拟核心 + 应用层，均已实施并校验），整合为单一设计文档：
 
-- **v2.0 模拟核心**（[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)）：统一键鼠事件模型（`SimulationEvent`），通过 `InputDriver` trait 抽象底层驱动；双线程 + 统一延迟模型，所有延迟在 worker 单线程串行执行，保证时序精确。
-- **v3.0 应用层**（[docs/ARCHITECTURE_V3.md](docs/ARCHITECTURE_V3.md)）：拆分为 `commands/`（命令）、`runner/`（运行生命周期 + `SequenceBuilder`）、`listener/`（监听 + 路由）三层，消除键盘 / 鼠标启动分支的重复，面向「混合序列 + 更丰富操作类型」可扩展。
+- 统一键鼠事件模型（`SimulationEvent`）+ `InputDriver` 驱动抽象；双线程 + 统一延迟模型，所有延迟在消费线程串行执行，保证时序精确。
+- 应用层分为 `commands/`（命令）、`runner/`（运行生命周期 + `SequenceBuilder`）、`listener/`（监听 + 路由）三层，面向「混合序列 + 更丰富操作类型」可扩展。
+
+详见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。
 
 ## 文档
 
-- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — v2.0 模拟核心重构方案（已完成）
-- [docs/ARCHITECTURE_V3.md](docs/ARCHITECTURE_V3.md) — v3.0 应用层重构方案（已完成）
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — 后端架构设计（模拟核心 + 应用层，已完成）
 - [docs/REQUIREMENTS.md](docs/REQUIREMENTS.md) — 功能需求与行为约束
 - [docs/DESIGN.md](docs/DESIGN.md) — 技术设计与模块划分
 - [docs/TASKS.md](docs/TASKS.md) — 实施顺序与阶段验收
