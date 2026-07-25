@@ -1,0 +1,546 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Mimic 使用说明</title>
+  <style>
+    :root {
+      --primary: #FE7733;
+      --primary-dark: #E56627;
+      --bg: #1A1A1A;
+      --bg-card: #242424;
+      --bg-elevated: #2E2E2E;
+      --text-primary: #E8E8E8;
+      --text-secondary: #A0A0A0;
+      --text-disabled: #666666;
+      --border: #3A3A3A;
+      --success: #4CAF50;
+      --warning: #FF9800;
+      --danger: #F44336;
+      --shadow: rgba(0, 0, 0, 0.3);
+    }
+
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Microsoft YaHei', sans-serif;
+      background: var(--bg);
+      color: var(--text-primary);
+      line-height: 1.6;
+      padding: 20px;
+    }
+
+    .container {
+      max-width: 900px;
+      margin: 0 auto;
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      overflow: hidden;
+      box-shadow: 0 4px 20px var(--shadow);
+    }
+
+    .header {
+      background: linear-gradient(135deg, var(--primary) 0%, var(--primary-dark) 100%);
+      padding: 40px 30px;
+      text-align: center;
+    }
+
+    .header h1 {
+      font-size: 36px;
+      font-weight: 700;
+      color: white;
+      margin-bottom: 8px;
+      letter-spacing: 1px;
+    }
+
+    .header .version {
+      font-size: 14px;
+      color: rgba(255, 255, 255, 0.85);
+      margin-bottom: 12px;
+    }
+
+    .header .tagline {
+      font-size: 16px;
+      color: rgba(255, 255, 255, 0.9);
+    }
+
+    .content {
+      padding: 40px 30px;
+    }
+
+    .section {
+      margin-bottom: 40px;
+    }
+
+    .section:last-child {
+      margin-bottom: 0;
+    }
+
+    h2 {
+      font-size: 24px;
+      font-weight: 600;
+      color: var(--primary);
+      margin-bottom: 16px;
+      padding-bottom: 8px;
+      border-bottom: 2px solid var(--border);
+    }
+
+    h3 {
+      font-size: 18px;
+      font-weight: 600;
+      color: var(--text-primary);
+      margin-top: 24px;
+      margin-bottom: 12px;
+    }
+
+    p {
+      margin-bottom: 12px;
+      color: var(--text-secondary);
+    }
+
+    ul, ol {
+      margin-left: 20px;
+      margin-bottom: 16px;
+    }
+
+    li {
+      margin-bottom: 8px;
+      color: var(--text-secondary);
+    }
+
+    .card {
+      background: var(--bg-elevated);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 20px;
+      margin-bottom: 16px;
+    }
+
+    .card h3 {
+      margin-top: 0;
+    }
+
+    .highlight {
+      background: var(--bg-elevated);
+      border-left: 4px solid var(--primary);
+      padding: 16px 20px;
+      border-radius: 4px;
+      margin-bottom: 16px;
+    }
+
+    .highlight strong {
+      color: var(--primary);
+    }
+
+    .warning {
+      background: rgba(255, 152, 0, 0.1);
+      border-left: 4px solid var(--warning);
+      padding: 16px 20px;
+      border-radius: 4px;
+      margin-bottom: 16px;
+    }
+
+    .warning strong {
+      color: var(--warning);
+    }
+
+    .danger {
+      background: rgba(244, 67, 54, 0.1);
+      border-left: 4px solid var(--danger);
+      padding: 16px 20px;
+      border-radius: 4px;
+      margin-bottom: 16px;
+    }
+
+    .danger strong {
+      color: var(--danger);
+    }
+
+    .steps {
+      counter-reset: step-counter;
+      list-style: none;
+      margin-left: 0;
+    }
+
+    .steps li {
+      counter-increment: step-counter;
+      position: relative;
+      padding-left: 40px;
+      margin-bottom: 20px;
+    }
+
+    .steps li::before {
+      content: counter(step-counter);
+      position: absolute;
+      left: 0;
+      top: 0;
+      width: 28px;
+      height: 28px;
+      background: var(--primary);
+      color: white;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-weight: 600;
+      font-size: 14px;
+    }
+
+    .kbd {
+      display: inline-block;
+      padding: 4px 8px;
+      background: var(--bg-elevated);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      font-family: 'Consolas', 'Courier New', monospace;
+      font-size: 13px;
+      color: var(--primary);
+      font-weight: 600;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-bottom: 16px;
+      background: var(--bg-elevated);
+      border-radius: 8px;
+      overflow: hidden;
+    }
+
+    th, td {
+      padding: 12px 16px;
+      text-align: left;
+      border-bottom: 1px solid var(--border);
+    }
+
+    th {
+      background: var(--bg);
+      color: var(--text-primary);
+      font-weight: 600;
+      font-size: 14px;
+    }
+
+    td {
+      color: var(--text-secondary);
+      font-size: 14px;
+    }
+
+    tr:last-child td {
+      border-bottom: none;
+    }
+
+    .footer {
+      background: var(--bg);
+      padding: 24px 30px;
+      text-align: center;
+      border-top: 1px solid var(--border);
+      color: var(--text-disabled);
+      font-size: 13px;
+    }
+
+    code {
+      background: var(--bg);
+      padding: 2px 6px;
+      border-radius: 3px;
+      font-family: 'Consolas', 'Courier New', monospace;
+      font-size: 13px;
+      color: var(--primary);
+    }
+
+    @media (max-width: 768px) {
+      body {
+        padding: 10px;
+      }
+
+      .header {
+        padding: 30px 20px;
+      }
+
+      .header h1 {
+        font-size: 28px;
+      }
+
+      .content {
+        padding: 30px 20px;
+      }
+
+      h2 {
+        font-size: 20px;
+      }
+
+      .card {
+        padding: 16px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <h1>Mimic</h1>
+      <div class="version">v0.1.0</div>
+      <div class="tagline">Windows 按键与鼠标模拟工具</div>
+    </div>
+
+    <div class="content">
+      <!-- 概述 -->
+      <div class="section">
+        <h2>📖 产品概述</h2>
+        <p>Mimic 是一款专为 Windows 平台设计的桌面按键/鼠标模拟工具，主要用于游戏场景中的自动化操作。通过配置按键序列、鼠标点击坐标与全局热键，按下启动热键后即可在后台循环执行模拟，支持热键提示音与自定义提示音录制。</p>
+
+        <div class="highlight">
+          <strong>核心特性：</strong>
+          <ul style="margin-bottom: 0; margin-top: 8px;">
+            <li>硬件级按键/鼠标模拟（基于 Interception 驱动）</li>
+            <li>全局热键控制，支持在游戏中启动/停止</li>
+            <li>支持按键按下、长按、组合键模拟</li>
+            <li>支持鼠标左键、右键、中键点击及坐标拾取</li>
+            <li>可录制自定义热键提示音（最长 5 秒）</li>
+            <li>配置自动保存，重启后自动恢复</li>
+          </ul>
+        </div>
+      </div>
+
+      <!-- 系统要求 -->
+      <div class="section">
+        <h2>💻 系统要求</h2>
+        <div class="card">
+          <ul style="margin-bottom: 0;">
+            <li><strong>操作系统：</strong>Windows 10 / 11（仅支持 Windows）</li>
+            <li><strong>权限要求：</strong>安装/卸载驱动需要管理员权限</li>
+            <li><strong>依赖驱动：</strong>Interception 驱动（首次使用需安装并重启系统）</li>
+            <li><strong>麦克风：</strong>录制自定义提示音时需要（可选）</li>
+          </ul>
+        </div>
+
+        <div class="warning">
+          <strong>⚠️ 重要提示：</strong>应用启动不需要管理员权限，仅在安装/卸载驱动时需要。首次使用时若未安装驱动，在首页会提示「驱动未安装」，点击「安装驱动」按钮会引导您提权。
+        </div>
+      </div>
+
+      <!-- 快速开始 -->
+      <div class="section">
+        <h2>🚀 快速开始</h2>
+
+        <h3>第一步：安装 Interception 驱动</h3>
+        <ol class="steps">
+          <li>打开 Mimic，在<strong>首页</strong>查看驱动状态</li>
+          <li>若显示「驱动未安装」，点击<strong>「以管理员身份重启」</strong>按钮（弹出 UAC 提示，点击「是」）</li>
+          <li>应用以管理员身份重启后，点击<strong>「安装驱动」</strong>按钮</li>
+          <li>安装成功后，点击<strong>「重启电脑」</strong>按钮重启系统（驱动需重启后才会加载）</li>
+          <li>重启后再次打开 Mimic，首页驱动状态应显示<strong>「Interception 驱动已加载」</strong>（绿色指示灯）</li>
+        </ol>
+
+        <div class="highlight">
+          <strong>💡 提示：</strong>驱动安装是一次性操作，安装成功并重启后，后续使用无需管理员权限，也无需重复安装。
+        </div>
+
+        <h3>第二步：配置按键模拟（示例：自动按 F 键）</h3>
+        <ol class="steps">
+          <li>点击左侧菜单的<strong>「按键模拟」</strong>页</li>
+          <li>点击顶部的<strong>输入框</strong>，按下键盘上的 <span class="kbd">F</span> 键进行捕获</li>
+          <li>点击<strong>「添加」</strong>按钮，列表中出现一行「F | 20 ms」</li>
+          <li>勾选该行最左侧的<strong>复选框</strong>启用该动作</li>
+          <li>修改时间间隔为 <code>1000</code>（即每秒按一次 F）</li>
+        </ol>
+
+        <h3>第三步：启动模拟</h3>
+        <ol class="steps">
+          <li>确认左侧菜单高亮在<strong>「按键模拟」</strong>页</li>
+          <li>按下默认启动热键 <span class="kbd">F12</span>（或在「设置」页自定义的热键）</li>
+          <li>听到提示音后，模拟开始运行，底部状态栏显示<strong>「按键模拟运行中」</strong></li>
+          <li>再次按下 <span class="kbd">F12</span> 停止模拟，听到停止提示音</li>
+        </ol>
+
+        <div class="warning">
+          <strong>⚠️ 注意：</strong>热键仅在<strong>「按键模拟」</strong>或<strong>「鼠标模拟」</strong>页有效。在首页或设置页按热键不会触发模拟。
+        </div>
+      </div>
+
+      <!-- 功能详解 -->
+      <div class="section">
+        <h2>⚙️ 功能详解</h2>
+
+        <div class="card">
+          <h3>🏠 首页（状态仪表盘）</h3>
+          <p>显示应用当前状态，包括：</p>
+          <ul>
+            <li><strong>管理员权限：</strong>绿色勾号表示已授权，橙色感叹号表示未授权（需安装/卸载驱动时提权）</li>
+            <li><strong>驱动状态：</strong>绿点=已加载，橙点=已安装待重启，灰点=未安装</li>
+            <li><strong>当前热键：</strong>显示启动/停止热键，点击「设置」页可修改</li>
+          </ul>
+        </div>
+
+        <div class="card">
+          <h3>⌨️ 按键模拟页</h3>
+          <p>配置需要模拟的按键序列：</p>
+          <ul>
+            <li><strong>添加按键：</strong>点击顶部输入框，按下目标键，点击「添加」</li>
+            <li><strong>启用/禁用：</strong>勾选复选框启用，取消勾选禁用（禁用的动作不会执行）</li>
+            <li><strong>时间间隔：</strong>每个动作执行后等待的时间（毫秒），默认 20ms</li>
+            <li><strong>删除按键：</strong>点击行末的 ✕ 按钮删除该动作</li>
+          </ul>
+          <p style="margin-bottom: 0;"><strong>执行逻辑：</strong>循环执行所有<strong>已启用</strong>的动作，每个动作执行后等待对应的时间间隔，然后执行下一个。</p>
+        </div>
+
+        <div class="card">
+          <h3>🖱️ 鼠标模拟页</h3>
+          <p>配置需要模拟的鼠标点击位置：</p>
+          <ul>
+            <li><strong>添加动作：</strong>点击底部「添加」按钮新增一行</li>
+            <li><strong>坐标拾取：</strong>点击「坐标拾取」按钮，窗口隐藏，在目标位置单击鼠标左键拾取坐标</li>
+            <li><strong>时间间隔：</strong>每个动作执行后等待的时间（毫秒），默认 20ms</li>
+            <li><strong>删除动作：</strong>点击行末的 ✕ 按钮删除该行</li>
+          </ul>
+          <p style="margin-bottom: 0;"><strong>执行逻辑：</strong>循环点击所有已配置坐标的动作（默认左键点击）。</p>
+        </div>
+
+        <div class="card">
+          <h3>🎛️ 设置页</h3>
+          <p>自定义全局热键与提示音：</p>
+          <ul>
+            <li><strong>启动热键：</strong>点击输入框捕获新按键，点击「保存」应用</li>
+            <li><strong>停止热键：</strong>点击输入框捕获新按键，点击「保存」应用（可与启动热键相同）</li>
+            <li><strong>提示音录制：</strong>
+              <ul>
+                <li>点击「录制」展开录制面板</li>
+                <li>点击「开始录制」对着麦克风说话（最长 5 秒）</li>
+                <li>点击「结束录制」或等待 5 秒自动停止</li>
+                <li>拖动波形上的起始/结束标记调整剪裁范围（最短 100ms）</li>
+                <li>点击「试听」预览选区，点击「保存」覆盖原文件</li>
+              </ul>
+            </li>
+          </ul>
+        </div>
+      </div>
+
+      <!-- 常见问题 -->
+      <div class="section">
+        <h2>❓ 常见问题</h2>
+
+        <h3>Q1: 为什么按热键没有反应？</h3>
+        <p><strong>可能原因：</strong></p>
+        <ul>
+          <li>当前页面不是「按键模拟」或「鼠标模拟」页（热键仅在这两个页面有效）</li>
+          <li>驱动未安装或未重启系统（首页检查驱动状态）</li>
+          <li>配置中没有已启用的动作（检查复选框是否勾选）</li>
+        </ul>
+
+        <h3>Q2: 安装驱动后提示「已安装需重启系统」？</h3>
+        <p><strong>解答：</strong>Interception 驱动是内核级驱动，安装后必须重启系统才会加载到内核。重启前驱动处于「已安装但未生效」状态，热键功能不可用。请点击「重启电脑」按钮或手动重启。</p>
+
+        <h3>Q3: 如何卸载驱动？</h3>
+        <p><strong>步骤：</strong></p>
+        <ol>
+          <li>在首页点击「以管理员身份重启」按钮提权（若已是管理员权限则跳过）</li>
+          <li>驱动卡片右侧点击「卸载驱动」按钮</li>
+          <li>在展开的确认区输入 <code>卸载驱动</code> 四个字，点击「确认卸载」</li>
+          <li>卸载成功后点击「重启电脑」按钮重启系统（卸载也需要重启才彻底生效）</li>
+        </ol>
+
+        <h3>Q4: 录制提示音时提示「未检测到麦克风」？</h3>
+        <p><strong>解答：</strong>系统未检测到默认输入设备。请检查：</p>
+        <ul>
+          <li>麦克风是否已连接并设为 Windows 默认录音设备（设置 → 系统 → 声音）</li>
+          <li>麦克风是否被其他应用占用</li>
+        </ul>
+
+        <h3>Q5: 模拟运行中如何修改配置？</h3>
+        <p><strong>解答：</strong>模拟运行期间界面会锁定（半透明遮罩），无法修改配置。需先按停止热键停止模拟，再修改。这是为了防止运行中修改导致行为不一致。</p>
+
+        <h3>Q6: 配置保存在哪里？</h3>
+        <p><strong>解答：</strong>配置文件为 <code>mimic.ini</code>，保存在 exe 同级目录。每次修改配置后自动保存，下次启动自动加载。若配置文件损坏或缺失，应用会自动创建默认配置。</p>
+      </div>
+
+      <!-- 注意事项 -->
+      <div class="section">
+        <h2>⚠️ 注意事项</h2>
+
+        <div class="danger">
+          <strong>🚨 安全警告：</strong>
+          <ul style="margin-bottom: 0; margin-top: 8px;">
+            <li>Interception 是内核级驱动，安装/卸载需要管理员权限，且需重启系统</li>
+            <li>卸载驱动前请确认模拟已停止，避免运行中卸载导致系统不稳定</li>
+            <li>请仅从官方渠道获取安装程序，避免使用来源不明的驱动文件</li>
+          </ul>
+        </div>
+
+        <div class="warning">
+          <strong>⚠️ 使用建议：</strong>
+          <ul style="margin-bottom: 0; margin-top: 8px;">
+            <li>按键模拟的时间间隔建议不低于 10ms，过短可能导致游戏检测异常</li>
+            <li>热键建议设为 F12 等功能键，避免与游戏内快捷键冲突</li>
+            <li>录制提示音时环境请保持安静，避免背景噪音</li>
+            <li>首次使用建议在测试环境（如记事本）验证功能正常后再用于游戏</li>
+          </ul>
+        </div>
+
+        <div class="highlight">
+          <strong>💡 性能提示：</strong>
+          <ul style="margin-bottom: 0; margin-top: 8px;">
+            <li>模拟运行时应用处于后台循环执行状态，CPU 占用取决于动作数量与时间间隔</li>
+            <li>建议时间间隔不低于 20ms（即每秒不超过 50 次操作），保持系统流畅</li>
+            <li>提示音播放通过 Windows waveOut API，延迟 < 15ms，不影响模拟精度</li>
+          </ul>
+        </div>
+      </div>
+
+      <!-- 技术说明 -->
+      <div class="section">
+        <h2>🔧 技术说明</h2>
+        <div class="card">
+          <h3>底层实现</h3>
+          <ul>
+            <li><strong>模拟驱动：</strong>Interception（第三方开源内核驱动）</li>
+            <li><strong>前端技术：</strong>Vue 3 + TypeScript + Vite</li>
+            <li><strong>后端技术：</strong>Rust + Tauri 2</li>
+            <li><strong>音频采集：</strong>cpal（Rust 跨平台音频库）</li>
+            <li><strong>运行平台：</strong>Windows 10 / 11（x64）</li>
+          </ul>
+        </div>
+
+        <div class="card">
+          <h3>文件结构</h3>
+          <ul style="margin-bottom: 0;">
+            <li><code>Mimic.exe</code> — 主程序</li>
+            <li><code>mimic.ini</code> — 配置文件（自动生成）</li>
+            <li><code>interception.dll</code> — 驱动通信 DLL</li>
+            <li><code>audio/按键开启.wav</code> — 启动热键提示音（可录制覆盖）</li>
+            <li><code>audio/按键关闭.wav</code> — 停止热键提示音（可录制覆盖）</li>
+            <li><code>drivers/install-interception.exe</code> — 驱动安装程序</li>
+          </ul>
+        </div>
+      </div>
+
+      <!-- 更新日志 -->
+      <div class="section">
+        <h2>📋 版本历史</h2>
+        <div class="card">
+          <h3>v0.1.0 (2026-07-25)</h3>
+          <ul style="margin-bottom: 0;">
+            <li>✨ 首个正式版本发布</li>
+            <li>✅ 支持按键按下、长按、组合键模拟</li>
+            <li>✅ 支持鼠标左键/右键/中键点击及坐标拾取</li>
+            <li>✅ 支持全局热键控制启动/停止</li>
+            <li>✅ 支持自定义热键提示音录制与剪裁</li>
+            <li>✅ 配置自动持久化与加载</li>
+            <li>✅ 驱动状态检测与一键安装</li>
+            <li>✅ 运行态锁定保护，防止运行中误操作</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+
+    <div class="footer">
+      <p>Mimic v0.1.0 © 2026 | Windows 按键与鼠标模拟工具</p>
+      <p style="margin-top: 8px; font-size: 12px;">本软件仅供学习与个人使用，请勿用于违反游戏服务条款的场景</p>
+    </div>
+  </div>
+</body>
+</html>
