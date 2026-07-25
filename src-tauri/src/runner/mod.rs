@@ -47,7 +47,10 @@ impl SimulationRunner {
             info!("[runner] calling builder.build()...");
             let sequence = match builder.build(&app_state.config) {
                 Some(seq) => {
-                    info!("[runner] builder.build() returned {} steps", seq.steps.len());
+                    info!(
+                        "[runner] builder.build() returned {} steps",
+                        seq.steps.len()
+                    );
                     seq
                 }
                 None => {

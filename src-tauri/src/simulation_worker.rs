@@ -51,7 +51,9 @@ pub fn start_simulation_worker(
                 };
                 matches!(
                     app_state.runtime_status,
-                    RuntimeStatus::RunningKeyboard | RuntimeStatus::RunningMouse
+                    RuntimeStatus::RunningKeyboard
+                        | RuntimeStatus::RunningMouse
+                        | RuntimeStatus::RunningCustom
                 )
             };
 
