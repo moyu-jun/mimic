@@ -54,9 +54,11 @@ pub fn start_pick_mouse_position(
 
 /// 拾取完成处理 — 由 listener 线程在捕获到左键坐标后调用。
 ///
-/// 恢复窗口、状态回 ReadyMouse、清除 pick_row_id、发送 mouse_position_picked。
+/// 恢复窗口、状态回 ReadyMouse / ReadyCustom（取决于拾取来源页）、
+/// 清除 pick_row_id、发送 mouse_position_picked。
 pub fn finish_pick(app: &AppHandle, state: &SharedState, x: i32, y: i32) {
-    let row_id = {
+    // 拾取可能从鼠标页或自定义序列详情页发起；后者需恢复到 ReadyCustom 以保持热键门控。
+    let (row_id, restore_status) = {
         let mut app_state = match state.lock() {
             Ok(s) => s,
             Err(e) => {
@@ -64,8 +66,13 @@ pub fn finish_pick(app: &AppHandle, state: &SharedState, x: i32, y: i32) {
                 return;
             }
         };
-        app_state.runtime_status = RuntimeStatus::ReadyMouse;
-        app_state.pick_row_id.take()
+        let restore_status = if app_state.active_custom_sequence_id.is_some() {
+            RuntimeStatus::ReadyCustom
+        } else {
+            RuntimeStatus::ReadyMouse
+        };
+        app_state.runtime_status = restore_status.clone();
+        (app_state.pick_row_id.take(), restore_status)
     };
 
     let row_id = match row_id {
@@ -73,14 +80,14 @@ pub fn finish_pick(app: &AppHandle, state: &SharedState, x: i32, y: i32) {
         None => {
             log::warn!("[mouse_picker] finish_pick called but pick_row_id is None");
             restore_window_on_main(app);
-            emit_status(app, RuntimeStatus::ReadyMouse);
+            emit_status(app, restore_status);
             return;
         }
     };
 
     log::info!("[mouse_picker] picked ({}, {}) for row {}", x, y, row_id);
     restore_window_on_main(app);
-    emit_status(app, RuntimeStatus::ReadyMouse);
+    emit_status(app, restore_status);
 
     if let Err(e) = app.emit(
         "mouse_position_picked",

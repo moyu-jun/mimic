@@ -4,7 +4,9 @@
 // 每种模拟模式（键盘 / 鼠标 / 未来混合）实现一个 builder。
 // 新增模式 = 新增一个 builder，监听层与 runner 完全不用改。
 
-use crate::config::{AppConfig, KeyActionType, MouseActionType};
+use crate::config::{
+    AppConfig, CustomAction, KeyActionType, KeyboardConfig, MouseActionType, MouseConfig,
+};
 use crate::simulation::action::{Action, ActionSequence};
 use crate::simulation::event::MouseButton;
 use crate::simulation::keyboard::KeyAction;
@@ -21,6 +23,67 @@ pub trait SequenceBuilder {
     fn running_status(&self) -> RuntimeStatus;
 }
 
+/// KeyboardConfig → Action（键盘三种动作类型）。供键盘/自定义 builder 共用。
+fn keyboard_config_to_action(cfg: &KeyboardConfig) -> Action {
+    match cfg.action_type {
+        KeyActionType::Press => Action::Keyboard(KeyAction::Press {
+            scan_code: cfg.scan_code,
+        }),
+        KeyActionType::Hold => Action::Keyboard(KeyAction::Hold {
+            scan_code: cfg.scan_code,
+            duration_ms: cfg.hold_duration_ms.unwrap_or(100),
+        }),
+        KeyActionType::Combo => Action::Keyboard(KeyAction::Combo {
+            modifiers: cfg.modifiers.clone(),
+            key: cfg.scan_code,
+        }),
+    }
+}
+
+/// MouseConfig → Action；坐标全空返回 None（无效动作）。供鼠标/自定义 builder 共用。
+fn mouse_config_to_action(cfg: &MouseConfig) -> Option<Action> {
+    let (x, y) = match (cfg.x, cfg.y) {
+        (Some(x), Some(y)) => (x, y),
+        _ => return None,
+    };
+    let action = match cfg.action_type {
+        MouseActionType::ClickLeft => Action::Mouse(MouseAction::Click {
+            button: MouseButton::Left,
+            x,
+            y,
+        }),
+        MouseActionType::ClickRight => Action::Mouse(MouseAction::Click {
+            button: MouseButton::Right,
+            x,
+            y,
+        }),
+        MouseActionType::ClickMiddle => Action::Mouse(MouseAction::Click {
+            button: MouseButton::Middle,
+            x,
+            y,
+        }),
+        MouseActionType::ScrollUp => Action::Mouse(MouseAction::Scroll {
+            delta: cfg.scroll_delta.unwrap_or(1),
+        }),
+        MouseActionType::ScrollDown => Action::Mouse(MouseAction::Scroll {
+            delta: -cfg.scroll_delta.unwrap_or(1),
+        }),
+        MouseActionType::Drag => {
+            let from = (x, y);
+            let to = (
+                cfg.drag_to_x.unwrap_or(from.0),
+                cfg.drag_to_y.unwrap_or(from.1),
+            );
+            Action::Mouse(MouseAction::Drag {
+                button: MouseButton::Left,
+                from,
+                to,
+            })
+        }
+    };
+    Some(action)
+}
+
 /// 键盘 builder：勾选项 → 对应 KeyAction，无勾选返回 None。
 pub struct KeyboardSequenceBuilder;
 
@@ -28,20 +91,7 @@ impl SequenceBuilder for KeyboardSequenceBuilder {
     fn build(&self, config: &AppConfig) -> Option<ActionSequence> {
         let mut sequence = ActionSequence::new();
         for cfg in config.keyboard_configs.iter().filter(|c| c.enabled) {
-            let action = match cfg.action_type {
-                KeyActionType::Press => Action::Keyboard(KeyAction::Press {
-                    scan_code: cfg.scan_code,
-                }),
-                KeyActionType::Hold => Action::Keyboard(KeyAction::Hold {
-                    scan_code: cfg.scan_code,
-                    duration_ms: cfg.hold_duration_ms.unwrap_or(100),
-                }),
-                KeyActionType::Combo => Action::Keyboard(KeyAction::Combo {
-                    modifiers: cfg.modifiers.clone(),
-                    key: cfg.scan_code,
-                }),
-            };
-            sequence.add(action, cfg.interval_ms);
+            sequence.add(keyboard_config_to_action(cfg), cfg.interval_ms);
         }
 
         if sequence.is_empty() {
@@ -62,49 +112,10 @@ pub struct MouseSequenceBuilder;
 impl SequenceBuilder for MouseSequenceBuilder {
     fn build(&self, config: &AppConfig) -> Option<ActionSequence> {
         let mut sequence = ActionSequence::new();
-        for cfg in config
-            .mouse_configs
-            .iter()
-            .filter(|c| c.enabled && c.x.is_some() && c.y.is_some())
-        {
-            // 上面 filter 已保证 x/y 为 Some
-            let (x, y) = (cfg.x.unwrap(), cfg.y.unwrap());
-            let action = match cfg.action_type {
-                MouseActionType::ClickLeft => Action::Mouse(MouseAction::Click {
-                    button: MouseButton::Left,
-                    x,
-                    y,
-                }),
-                MouseActionType::ClickRight => Action::Mouse(MouseAction::Click {
-                    button: MouseButton::Right,
-                    x,
-                    y,
-                }),
-                MouseActionType::ClickMiddle => Action::Mouse(MouseAction::Click {
-                    button: MouseButton::Middle,
-                    x,
-                    y,
-                }),
-                MouseActionType::ScrollUp => Action::Mouse(MouseAction::Scroll {
-                    delta: cfg.scroll_delta.unwrap_or(1),
-                }),
-                MouseActionType::ScrollDown => Action::Mouse(MouseAction::Scroll {
-                    delta: -cfg.scroll_delta.unwrap_or(1),
-                }),
-                MouseActionType::Drag => {
-                    let from = (x, y);
-                    let to = (
-                        cfg.drag_to_x.unwrap_or(from.0),
-                        cfg.drag_to_y.unwrap_or(from.1),
-                    );
-                    Action::Mouse(MouseAction::Drag {
-                        button: MouseButton::Left,
-                        from,
-                        to,
-                    })
-                }
-            };
-            sequence.add(action, cfg.interval_ms);
+        for cfg in config.mouse_configs.iter().filter(|c| c.enabled) {
+            if let Some(action) = mouse_config_to_action(cfg) {
+                sequence.add(action, cfg.interval_ms);
+            }
         }
 
         if sequence.is_empty() {
@@ -119,15 +130,60 @@ impl SequenceBuilder for MouseSequenceBuilder {
     }
 }
 
+/// 自定义序列 builder：按构造时传入的序列 id 取出对应序列，
+/// 遍历其 actions 按 kind 分派（未勾选 / 鼠标坐标全空跳过）。
+/// 找不到序列或序列无有效动作 → 返回 None（静默忽略启动）。
+///
+/// sequence_id 由调用方（hotkey.rs）从 AppState.active_custom_sequence_id 读出后注入，
+/// 使 build 仍只依赖 &AppConfig，便于单测。
+pub struct CustomSequenceBuilder {
+    pub sequence_id: String,
+}
+
+impl SequenceBuilder for CustomSequenceBuilder {
+    fn build(&self, config: &AppConfig) -> Option<ActionSequence> {
+        let seq_cfg = config
+            .custom_sequences
+            .iter()
+            .find(|s| s.id == self.sequence_id)?;
+
+        let mut sequence = ActionSequence::new();
+        for action in &seq_cfg.actions {
+            match action {
+                CustomAction::Keyboard(cfg) if cfg.enabled => {
+                    sequence.add(keyboard_config_to_action(cfg), cfg.interval_ms);
+                }
+                CustomAction::Mouse(cfg) if cfg.enabled => {
+                    if let Some(a) = mouse_config_to_action(cfg) {
+                        sequence.add(a, cfg.interval_ms);
+                    }
+                }
+                _ => {} // 未勾选，跳过
+            }
+        }
+
+        if sequence.is_empty() {
+            None
+        } else {
+            Some(sequence)
+        }
+    }
+
+    fn running_status(&self) -> RuntimeStatus {
+        RuntimeStatus::RunningCustom
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{CapturedKey, HotkeyConfig, KeyboardConfig, MouseConfig};
+    use crate::config::{CapturedKey, CustomSequence, HotkeyConfig, KeyboardConfig, MouseConfig};
 
     fn empty_config() -> AppConfig {
         AppConfig {
             keyboard_configs: Vec::new(),
             mouse_configs: Vec::new(),
+            custom_sequences: Vec::new(),
             hotkeys: HotkeyConfig {
                 start: CapturedKey {
                     key_label: "F12".to_string(),
@@ -221,5 +277,59 @@ mod tests {
             MouseSequenceBuilder.running_status(),
             RuntimeStatus::RunningMouse
         );
+        assert_eq!(
+            CustomSequenceBuilder {
+                sequence_id: "x".to_string()
+            }
+            .running_status(),
+            RuntimeStatus::RunningCustom
+        );
+    }
+
+    fn custom_builder(id: &str) -> CustomSequenceBuilder {
+        CustomSequenceBuilder {
+            sequence_id: id.to_string(),
+        }
+    }
+
+    #[test]
+    fn custom_unknown_id_returns_none() {
+        let mut cfg = empty_config();
+        cfg.custom_sequences = vec![CustomSequence {
+            id: "seq-1".to_string(),
+            name: "s".to_string(),
+            actions: vec![CustomAction::Keyboard(kb(true, KeyActionType::Press))],
+        }];
+        // 激活 id 与任何序列都不匹配 → None
+        assert!(custom_builder("nope").build(&cfg).is_none());
+    }
+
+    #[test]
+    fn custom_empty_sequence_returns_none() {
+        let mut cfg = empty_config();
+        cfg.custom_sequences = vec![CustomSequence {
+            id: "seq-1".to_string(),
+            name: "s".to_string(),
+            actions: Vec::new(),
+        }];
+        assert!(custom_builder("seq-1").build(&cfg).is_none());
+    }
+
+    #[test]
+    fn custom_mixed_actions_builds_in_order_and_filters() {
+        let mut cfg = empty_config();
+        cfg.custom_sequences = vec![CustomSequence {
+            id: "seq-1".to_string(),
+            name: "s".to_string(),
+            actions: vec![
+                CustomAction::Keyboard(kb(true, KeyActionType::Press)), // 有效
+                CustomAction::Mouse(ms(true, None, None)),              // 坐标全空 → 跳过
+                CustomAction::Mouse(ms(true, Some(10), Some(20))),      // 有效
+                CustomAction::Keyboard(kb(false, KeyActionType::Press)), // 未勾选 → 跳过
+            ],
+        }];
+        let seq = custom_builder("seq-1").build(&cfg).unwrap();
+        // 只保留 2 个有效动作，顺序 = 数组顺序
+        assert_eq!(seq.steps.len(), 2);
     }
 }

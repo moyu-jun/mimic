@@ -6,7 +6,9 @@
 
 mod builder;
 
-pub use builder::{KeyboardSequenceBuilder, MouseSequenceBuilder, SequenceBuilder};
+pub use builder::{
+    CustomSequenceBuilder, KeyboardSequenceBuilder, MouseSequenceBuilder, SequenceBuilder,
+};
 
 use crate::simulation::executor::Scheduler;
 use crate::state::{RuntimeStatus, SharedState};
@@ -96,8 +98,8 @@ impl SimulationRunner {
         // 等待一小段时间让模拟循环退出
         std::thread::sleep(std::time::Duration::from_millis(50));
 
-        // 更新状态
-        {
+        // 更新状态 — 自定义序列停止后回 ReadyCustom（仍在详情页，可再启动）；其余回 Idle。
+        let new_status = {
             let mut app_state = match state.lock() {
                 Ok(s) => s,
                 Err(e) => {
@@ -105,13 +107,19 @@ impl SimulationRunner {
                     return;
                 }
             };
-            app_state.runtime_status = RuntimeStatus::Idle;
-        }
+            let status = if app_state.active_custom_sequence_id.is_some() {
+                RuntimeStatus::ReadyCustom
+            } else {
+                RuntimeStatus::Idle
+            };
+            app_state.runtime_status = status.clone();
+            status
+        };
 
         // 发送 runtime_status_changed 事件
         if let Err(e) = app.emit(
             "runtime_status_changed",
-            serde_json::json!({ "status": RuntimeStatus::Idle }),
+            serde_json::json!({ "status": new_status }),
         ) {
             error!("[runner] failed to emit runtime_status_changed: {}", e);
         }

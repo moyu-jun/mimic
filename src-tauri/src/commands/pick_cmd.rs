@@ -23,6 +23,7 @@ pub fn start_pick_mouse_position(
         match app_state.runtime_status {
             RuntimeStatus::RunningKeyboard
             | RuntimeStatus::RunningMouse
+            | RuntimeStatus::RunningCustom
             | RuntimeStatus::PickingMouse
             | RuntimeStatus::Recording => {
                 return Err("busy: simulation running".to_string());

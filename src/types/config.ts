@@ -7,16 +7,18 @@
  * - selected 改名为 enabled（更语义化）
  */
 
-/** 左侧菜单的四个页面标识 */
-export type AppPage = 'home' | 'keyboard' | 'mouse' | 'settings'
+/** 左侧菜单的页面标识 */
+export type AppPage = 'home' | 'keyboard' | 'mouse' | 'custom' | 'settings'
 
 /** 运行状态机 */
 export type RuntimeStatus =
   | 'Idle'
   | 'ReadyKeyboard'
   | 'ReadyMouse'
+  | 'ReadyCustom'
   | 'RunningKeyboard'
   | 'RunningMouse'
+  | 'RunningCustom'
   | 'PickingMouse'
   | 'Recording'
   | 'Error'
@@ -71,6 +73,21 @@ export interface MouseConfig {
   intervalMs: number
 }
 
+/**
+ * 自定义序列中的单个动作 — 判别联合，`kind` 为判别字段。
+ * 对应 Rust 侧 #[serde(tag = "kind")] 的 CustomAction 枚举。
+ */
+export type CustomAction =
+  | ({ kind: 'keyboard' } & KeyboardConfig)
+  | ({ kind: 'mouse' } & MouseConfig)
+
+/** 具名自定义序列 — actions 为有序数组，执行顺序 = 数组顺序 */
+export interface CustomSequence {
+  id: string
+  name: string
+  actions: CustomAction[]
+}
+
 /** 热键配置 */
 export interface HotkeyConfig {
   start: CapturedKey
@@ -81,6 +98,7 @@ export interface HotkeyConfig {
 export interface AppConfig {
   keyboardConfigs: KeyboardConfig[]
   mouseConfigs: MouseConfig[]
+  customSequences: CustomSequence[]
   hotkeys: HotkeyConfig
 }
 

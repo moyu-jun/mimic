@@ -3,7 +3,9 @@
 // 由 hotkeys_interception.rs 拆分而来：处理单个键盘 stroke，
 // 命中启动/停止热键时按 current_page 选 builder 调 SimulationRunner，否则透传。
 
-use crate::runner::{KeyboardSequenceBuilder, MouseSequenceBuilder, SimulationRunner};
+use crate::runner::{
+    CustomSequenceBuilder, KeyboardSequenceBuilder, MouseSequenceBuilder, SimulationRunner,
+};
 use crate::state::{RuntimeStatus, SharedState};
 use interception::{Interception, KeyState, ScanCode, Stroke};
 use log::{error, info};
@@ -37,7 +39,7 @@ pub fn handle_keyboard_stroke(
     }
 
     // 读取当前热键配置
-    let (start_scan_code, stop_scan_code, current_page, runtime_status) = {
+    let (start_scan_code, stop_scan_code, current_page, runtime_status, active_custom_id) = {
         let app_state = match state.lock() {
             Ok(s) => s,
             Err(e) => {
@@ -51,6 +53,7 @@ pub fn handle_keyboard_stroke(
             app_state.config.hotkeys.stop.scan_code,
             app_state.current_page.clone(),
             app_state.runtime_status.clone(),
+            app_state.active_custom_sequence_id.clone(),
         )
     };
 
@@ -71,7 +74,12 @@ pub fn handle_keyboard_stroke(
     );
 
     // 页面过滤 — REQUIREMENTS 3.6
-    if current_page.as_str() != "keyboard" && current_page.as_str() != "mouse" {
+    // custom 页仅在详情子页（runtime_status == ReadyCustom/RunningCustom）才可触发；
+    // 卡片列表页虽也是 current_page=="custom" 但状态为 Idle，会被下方状态机门控挡下。
+    if current_page.as_str() != "keyboard"
+        && current_page.as_str() != "mouse"
+        && current_page.as_str() != "custom"
+    {
         info!(
             "[listener] hotkey blocked by page filter: current_page={}",
             current_page
@@ -82,15 +90,24 @@ pub fn handle_keyboard_stroke(
 
     // 状态机门控：根据当前状态决定行为（支持 toggle）
     match runtime_status {
-        RuntimeStatus::Idle | RuntimeStatus::ReadyKeyboard | RuntimeStatus::ReadyMouse
+        RuntimeStatus::Idle
+        | RuntimeStatus::ReadyKeyboard
+        | RuntimeStatus::ReadyMouse
+        | RuntimeStatus::ReadyCustom
             if is_start_key =>
         {
             // Idle/Ready* 状态下按启动键 → 启动模拟
+            // 注意：列表页为 Idle + current_page=="custom"，handle_start_hotkey 会因无 builder 分支
+            // 落到 keyboard 序列 → 但 ReadyCustom 才由 CustomSequenceBuilder 处理，见下。
             info!("[listener] state machine: START branch matched");
-            handle_start_hotkey(app, state, current_page.as_str());
+            handle_start_hotkey(app, state, &runtime_status, active_custom_id.as_deref());
             // 阻断热键事件，不透传到系统
         }
-        RuntimeStatus::RunningKeyboard | RuntimeStatus::RunningMouse if is_stop_key => {
+        RuntimeStatus::RunningKeyboard
+        | RuntimeStatus::RunningMouse
+        | RuntimeStatus::RunningCustom
+            if is_stop_key =>
+        {
             // Running 状态下按停止键 → 停止模拟
             info!("[listener] state machine: STOP branch matched");
             SimulationRunner::stop(app, state);
@@ -111,16 +128,39 @@ pub fn handle_keyboard_stroke(
     }
 }
 
-/// 启动热键回调 — 按当前页选 SequenceBuilder，交由 SimulationRunner 统一编排。
-fn handle_start_hotkey(app: &AppHandle, state: &SharedState, current_page: &str) {
+/// 启动热键回调 — 按 Ready* 状态选 SequenceBuilder，交由 SimulationRunner 统一编排。
+///
+/// 按状态而非页面分派：ReadyCustom 才走 CustomSequenceBuilder；custom 列表页为 Idle → 无分支 → 静默忽略
+/// （对应「列表页热键无效」的需求）。
+fn handle_start_hotkey(
+    app: &AppHandle,
+    state: &SharedState,
+    runtime_status: &RuntimeStatus,
+    active_custom_id: Option<&str>,
+) {
     info!(
-        "[listener] handle_start_hotkey called: current_page={}",
-        current_page
+        "[listener] handle_start_hotkey called: status={:?}",
+        runtime_status
     );
-    if current_page == "keyboard" {
-        SimulationRunner::start(app, state, &KeyboardSequenceBuilder);
-    } else {
-        SimulationRunner::start(app, state, &MouseSequenceBuilder);
+    match runtime_status {
+        RuntimeStatus::ReadyKeyboard => {
+            SimulationRunner::start(app, state, &KeyboardSequenceBuilder)
+        }
+        RuntimeStatus::ReadyMouse => SimulationRunner::start(app, state, &MouseSequenceBuilder),
+        RuntimeStatus::ReadyCustom => match active_custom_id {
+            Some(id) => SimulationRunner::start(
+                app,
+                state,
+                &CustomSequenceBuilder {
+                    sequence_id: id.to_string(),
+                },
+            ),
+            None => info!("[listener] ReadyCustom but no active sequence id, ignored"),
+        },
+        _ => {
+            // Idle（含 custom 列表页）等其它状态：无有效启动目标，忽略。
+            info!("[listener] handle_start_hotkey: no builder for status, ignored");
+        }
     }
 }
 

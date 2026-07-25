@@ -24,6 +24,7 @@ pub fn set_current_page(
         match app_state.runtime_status {
             RuntimeStatus::RunningKeyboard
             | RuntimeStatus::RunningMouse
+            | RuntimeStatus::RunningCustom
             | RuntimeStatus::PickingMouse
             | RuntimeStatus::Recording => {
                 return Err("busy: simulation running".to_string());
@@ -39,10 +40,17 @@ pub fn set_current_page(
             .map_err(|e| format!("Failed to lock state: {}", e))?;
         app_state.current_page = page.clone();
 
+        // 切页即离开任何自定义序列详情页 → 清空激活序列（列表页/其它页热键无效）。
+        app_state.active_custom_sequence_id = None;
+
         // P2-3: 非 Running*/PickingMouse 状态下根据页面切换到对应 Ready 状态
         // 修复: Ready 状态间也需要切换 (ReadyKeyboard ↔ ReadyMouse)
+        // custom 页为卡片列表 → 归入 Idle（详情页的 ReadyCustom 由 enter_custom_sequence 设置）。
         match app_state.runtime_status {
-            RuntimeStatus::Idle | RuntimeStatus::ReadyKeyboard | RuntimeStatus::ReadyMouse => {
+            RuntimeStatus::Idle
+            | RuntimeStatus::ReadyKeyboard
+            | RuntimeStatus::ReadyMouse
+            | RuntimeStatus::ReadyCustom => {
                 app_state.runtime_status = match page.as_str() {
                     "keyboard" => RuntimeStatus::ReadyKeyboard,
                     "mouse" => RuntimeStatus::ReadyMouse,
@@ -122,6 +130,11 @@ pub fn stop_simulation(
                 app_state.runtime_status = RuntimeStatus::Idle;
                 RuntimeStatus::Idle
             }
+            // 自定义序列停止后回到详情页的 ReadyCustom（激活序列仍保留，可再次启动）。
+            RuntimeStatus::RunningCustom => {
+                app_state.runtime_status = RuntimeStatus::ReadyCustom;
+                RuntimeStatus::ReadyCustom
+            }
             _ => {
                 return Err("Not running".to_string());
             }
@@ -148,4 +161,49 @@ pub fn get_runtime_status(state: tauri::State<SharedState>) -> Result<RuntimeSta
         .lock()
         .map_err(|e| format!("Failed to lock state: {}", e))?;
     Ok(app_state.runtime_status.clone())
+}
+
+/// 进入某个自定义序列详情页 — 记录激活序列并进入 ReadyCustom。
+///
+/// 前端进入详情子页时调用；离开时改调 `set_current_page("custom")` 复位为 Idle 并清空激活序列。
+/// 只有处于 ReadyCustom（激活了某序列）时，自定义热键才会启动该序列（见 hotkey.rs 门控）。
+#[tauri::command]
+pub fn enter_custom_sequence(
+    id: String,
+    state: tauri::State<SharedState>,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    let new_status = {
+        let mut app_state = state
+            .inner()
+            .lock()
+            .map_err(|e| format!("Failed to lock state: {}", e))?;
+
+        // 运行态守卫：模拟运行中不允许切换激活序列。
+        match app_state.runtime_status {
+            RuntimeStatus::RunningKeyboard
+            | RuntimeStatus::RunningMouse
+            | RuntimeStatus::RunningCustom
+            | RuntimeStatus::PickingMouse
+            | RuntimeStatus::Recording => {
+                return Err("busy: simulation running".to_string());
+            }
+            _ => {}
+        }
+
+        app_state.current_page = "custom".to_string();
+        app_state.active_custom_sequence_id = Some(id.clone());
+        app_state.runtime_status = RuntimeStatus::ReadyCustom;
+        log::info!("[enter_custom_sequence] active sequence id={}", id);
+        RuntimeStatus::ReadyCustom
+    };
+
+    if let Err(e) = app.emit(
+        "runtime_status_changed",
+        serde_json::json!({ "status": new_status }),
+    ) {
+        log::error!("[enter_custom_sequence] failed to emit event: {}", e);
+    }
+
+    Ok(())
 }

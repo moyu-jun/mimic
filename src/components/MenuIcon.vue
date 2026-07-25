@@ -44,6 +44,12 @@ defineProps<{ name: AppPage }>()
       <path d="M8 1.5 V7" />
     </template>
 
+    <!-- 自定义：三条带前导圆点的序列行（表示可编排的有序动作列表） -->
+    <template v-else-if="name === 'custom'">
+      <path d="M3 4 h0.01 M3 8 h0.01 M3 12 h0.01" />
+      <path d="M6 4 H13 M6 8 H13 M6 12 H13" />
+    </template>
+
     <!-- 设置：齿轮（中心圆 + 8 个齿） -->
     <template v-else-if="name === 'settings'">
       <circle cx="8" cy="8" r="2.2" />

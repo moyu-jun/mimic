@@ -19,6 +19,7 @@ import AppStatusBar from './components/AppStatusBar.vue'
 import HomePage from './pages/HomePage.vue'
 import KeyboardPage from './pages/KeyboardPage.vue'
 import MousePage from './pages/MousePage.vue'
+import CustomPage from './pages/CustomPage.vue'
 import SettingsPage from './pages/SettingsPage.vue'
 import type { AppPage, RuntimeStatus } from './types/config'
 
@@ -26,6 +27,7 @@ const PAGE_COMPONENTS = {
   home: HomePage,
   keyboard: KeyboardPage,
   mouse: MousePage,
+  custom: CustomPage,
   settings: SettingsPage,
 } satisfies Record<AppPage, unknown>
 
@@ -39,12 +41,14 @@ onMounted(async () => {
     const config = await invoke<{
       keyboardConfigs: typeof appStore.keyboardConfigs
       mouseConfigs: typeof appStore.mouseConfigs
+      customSequences: typeof appStore.customSequences
       hotkeys: typeof appStore.hotkeys
     }>('load_config')
 
     // 注入到 appStore
     appStore.keyboardConfigs = config.keyboardConfigs
     appStore.mouseConfigs = config.mouseConfigs
+    appStore.customSequences = config.customSequences ?? []
     appStore.hotkeys = config.hotkeys
   } catch (error) {
     console.error('Failed to load config:', error)
@@ -53,7 +57,7 @@ onMounted(async () => {
   // 监听 runtime_status_changed 事件
   unlisten = await listen<{ status: RuntimeStatus }>('runtime_status_changed', (event) => {
     appStore.runtimeStatus = event.payload.status
-    appStore.isLocked = ['RunningKeyboard', 'RunningMouse', 'PickingMouse'].includes(event.payload.status)
+    appStore.isLocked = ['RunningKeyboard', 'RunningMouse', 'RunningCustom', 'PickingMouse'].includes(event.payload.status)
   })
 })
 

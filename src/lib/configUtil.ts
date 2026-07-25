@@ -17,6 +17,7 @@ export async function persistConfig(): Promise<void> {
       config: {
         keyboardConfigs: appStore.keyboardConfigs,
         mouseConfigs: appStore.mouseConfigs,
+        customSequences: appStore.customSequences,
         hotkeys: appStore.hotkeys,
       }
     })

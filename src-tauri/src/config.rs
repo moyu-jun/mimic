@@ -80,6 +80,24 @@ pub struct MouseConfig {
     pub interval_ms: u64,
 }
 
+/// 自定义序列中的单个动作 — 判别联合，复用现有 Keyboard/MouseConfig。
+/// serde 内部标签 `kind`：{"kind":"keyboard", ...} / {"kind":"mouse", ...}。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum CustomAction {
+    Keyboard(KeyboardConfig),
+    Mouse(MouseConfig),
+}
+
+/// 具名自定义序列 — actions 为有序数组，执行顺序 = 数组顺序。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CustomSequence {
+    pub id: String,
+    pub name: String,
+    pub actions: Vec<CustomAction>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HotkeyConfig {
@@ -92,6 +110,8 @@ pub struct HotkeyConfig {
 pub struct AppConfig {
     pub keyboard_configs: Vec<KeyboardConfig>,
     pub mouse_configs: Vec<MouseConfig>,
+    #[serde(default)]
+    pub custom_sequences: Vec<CustomSequence>,
     pub hotkeys: HotkeyConfig,
 }
 
@@ -118,6 +138,7 @@ pub fn default_config() -> AppConfig {
             drag_to_y: None,
             interval_ms: DEFAULT_INTERVAL_MS,
         }],
+        custom_sequences: Vec::new(),
         hotkeys: HotkeyConfig {
             start: CapturedKey {
                 key_label: "F12".to_string(),
@@ -174,6 +195,43 @@ pub fn sanitize_config(config: &mut AppConfig) {
         |c| &c.id,
         |c, new_id| c.id = new_id,
         "mouse",
+    );
+
+    // 自定义序列：每个序列内 clamp interval + 动作 id 去重；再对序列 id 去重。
+    for seq in &mut config.custom_sequences {
+        for action in &mut seq.actions {
+            let interval = match action {
+                CustomAction::Keyboard(c) => &mut c.interval_ms,
+                CustomAction::Mouse(c) => &mut c.interval_ms,
+            };
+            if *interval < MIN_INTERVAL_MS {
+                log::warn!(
+                    "[config] custom sequence {} action intervalMs {} < {}, clamped",
+                    seq.id,
+                    *interval,
+                    MIN_INTERVAL_MS
+                );
+                *interval = MIN_INTERVAL_MS;
+            }
+        }
+        dedupe_ids(
+            &mut seq.actions,
+            |a| match a {
+                CustomAction::Keyboard(c) => &c.id,
+                CustomAction::Mouse(c) => &c.id,
+            },
+            |a, new_id| match a {
+                CustomAction::Keyboard(c) => c.id = new_id,
+                CustomAction::Mouse(c) => c.id = new_id,
+            },
+            "custom action",
+        );
+    }
+    dedupe_ids(
+        &mut config.custom_sequences,
+        |s| &s.id,
+        |s, new_id| s.id = new_id,
+        "custom sequence",
     );
 }
 
@@ -299,9 +357,18 @@ fn load_from_ini(path: &PathBuf) -> Result<AppConfig, String> {
     let mouse_configs: Vec<MouseConfig> = serde_json::from_str(mouse_configs_json)
         .map_err(|e| format!("Failed to parse mouse configs: {}", e))?;
 
+    // [custom] section 可选（旧配置文件无此段）→ 缺失时按空序列处理。
+    let custom_sequences: Vec<CustomSequence> =
+        match ini.section(Some("custom")).and_then(|s| s.get("sequences")) {
+            Some(json) => serde_json::from_str(json)
+                .map_err(|e| format!("Failed to parse custom sequences: {}", e))?,
+            None => Vec::new(),
+        };
+
     Ok(AppConfig {
         keyboard_configs,
         mouse_configs,
+        custom_sequences,
         hotkeys,
     })
 }
@@ -333,6 +400,11 @@ pub fn save(config: &AppConfig) -> Result<(), String> {
     let mouse_json = serde_json::to_string(&sanitized.mouse_configs)
         .map_err(|e| format!("Failed to serialize mouse configs: {}", e))?;
     ini.with_section(Some("mouse")).set("configs", mouse_json);
+
+    let custom_json = serde_json::to_string(&sanitized.custom_sequences)
+        .map_err(|e| format!("Failed to serialize custom sequences: {}", e))?;
+    ini.with_section(Some("custom"))
+        .set("sequences", custom_json);
 
     let mut tmp_os = path.clone().into_os_string();
     tmp_os.push(".tmp");

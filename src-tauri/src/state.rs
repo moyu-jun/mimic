@@ -39,6 +39,10 @@ pub enum RuntimeStatus {
     RunningKeyboard,
     /// 鼠标模拟运行中
     RunningMouse,
+    /// 当前处于自定义序列详情页，可启动该序列模拟
+    ReadyCustom,
+    /// 自定义序列模拟运行中
+    RunningCustom,
     /// 正在拾取鼠标坐标
     PickingMouse,
     /// 正在录制提示音（阶段 18）
@@ -81,6 +85,9 @@ pub struct AppState {
     pub stop_flag: Arc<AtomicBool>,
     /// 当前坐标拾取的目标行 ID；Some 表示拾取进行中（PickingMouse 状态下由 listener 读取）
     pub pick_row_id: Option<String>,
+    /// 当前激活的自定义序列 ID；Some 表示处于某序列详情页，热键启动作用于该序列。
+    /// 列表页为 None → 热键无效（CustomSequenceBuilder 找不到序列返回 None）。
+    pub active_custom_sequence_id: Option<String>,
     /// 监听专用 context（设置 filter + 阻塞 wait）
     pub interception_listener: Arc<Mutex<Option<SendInterception>>>,
     /// 模拟专用 context（仅 send，非阻塞）
