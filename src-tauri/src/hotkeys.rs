@@ -1,6 +1,6 @@
 // 全局热键注册与管理 — DESIGN 6 / DESIGN 8.3 / 阶段 13
 //
-// 阶段 13：热键配置管理，实际监听由 hotkeys_interception 模块处理。
+// 阶段 13：热键配置管理，实际监听由 listener 模块处理。
 
 use crate::config::{self, HotkeyConfig};
 use crate::state::SharedState;

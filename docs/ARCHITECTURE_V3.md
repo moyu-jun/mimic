@@ -6,7 +6,7 @@
 >
 > **设计日期**: 2026-07-25
 > **架构版本**: v3.0（应用层）
-> **状态**: 待批准
+> **状态**: 已实施完成（阶段 A–D 全部落地）
 > **范围**: 仅 `src-tauri/` 后端；前端保持现状
 >
 > ---
@@ -344,5 +344,6 @@ MousePage     ──►   AppConfig.mouseActions   ──┤► SequenceBuilder 
 | 版本 | 日期 | 说明 |
 |------|------|------|
 | v3.0 | 2026-07-25 | 应用层重构设计：commands / runner / listener 三层拆分，SequenceBuilder 抽象 |
+| v3.0 实施 | 2026-07-25 | 阶段 A–D 全部落地：commands/ 抽离；新增 runner/（SequenceBuilder + Keyboard/MouseSequenceBuilder + SimulationRunner，7 个 builder 单测）；hotkeys_interception.rs 拆为 listener/{mod,filter,hotkey}.rs 并删除原文件。静态检查（fmt/clippy -D warnings/check）+ builder 单测通过；运行时行为待实机复核。 |
 
 **文档结束**
