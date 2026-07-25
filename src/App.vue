@@ -33,28 +33,26 @@ const currentPageComponent = computed(() => PAGE_COMPONENTS[appStore.currentPage
 
 let unlisten: UnlistenFn | null = null
 
-// 阶段 8: 启动时加载配置(当前从后端内存默认配置加载)
+// 启动时加载配置 — ARCHITECTURE v3.0 重构
 onMounted(async () => {
   try {
     const config = await invoke<{
-      keyboardActions: typeof appStore.keyboardActions
-      mouseActions: typeof appStore.mouseActions
+      keyboardConfigs: typeof appStore.keyboardConfigs
+      mouseConfigs: typeof appStore.mouseConfigs
       hotkeys: typeof appStore.hotkeys
     }>('load_config')
 
-    // 注入到 appStore, 替换前端 mock 初值
-    appStore.keyboardActions = config.keyboardActions
-    appStore.mouseActions = config.mouseActions
+    // 注入到 appStore
+    appStore.keyboardConfigs = config.keyboardConfigs
+    appStore.mouseConfigs = config.mouseConfigs
     appStore.hotkeys = config.hotkeys
   } catch (error) {
     console.error('Failed to load config:', error)
-    // 加载失败时保持前端 mock 数据, 应用仍可运行
   }
 
-  // 阶段 12：监听 runtime_status_changed 事件
+  // 监听 runtime_status_changed 事件
   unlisten = await listen<{ status: RuntimeStatus }>('runtime_status_changed', (event) => {
     appStore.runtimeStatus = event.payload.status
-    // Running* 或 PickingMouse 时上锁, 否则解锁
     appStore.isLocked = ['RunningKeyboard', 'RunningMouse', 'PickingMouse'].includes(event.payload.status)
   })
 })

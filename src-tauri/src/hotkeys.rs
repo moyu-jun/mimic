@@ -57,9 +57,9 @@ pub fn update_hotkeys(
             .map_err(|e| format!("Failed to lock state: {}", e))?;
         app_state
             .config
-            .keyboard_actions
+            .keyboard_configs
             .iter()
-            .map(|a| a.scan_code)
+            .map(|c| c.scan_code)
             .collect()
     };
 

@@ -324,7 +324,7 @@ fn handle_start_keyboard(app: &AppHandle, state: &SharedState) {
     let new_status = RuntimeStatus::RunningKeyboard;
     info!("[hotkeys_interception] start triggered: Idle -> RunningKeyboard");
 
-    let (selected_actions, event_tx, stop_flag) = {
+    let (enabled, event_tx, stop_flag) = {
         let mut app_state = match state.lock() {
             Ok(s) => s,
             Err(e) => {
@@ -339,15 +339,15 @@ fn handle_start_keyboard(app: &AppHandle, state: &SharedState) {
         app_state
             .stop_flag
             .store(false, std::sync::atomic::Ordering::Relaxed);
-        let selected = app_state
+        let enabled = app_state
             .config
-            .keyboard_actions
+            .keyboard_configs
             .iter()
-            .filter(|a| a.selected)
+            .filter(|c| c.enabled)
             .cloned()
             .collect::<Vec<_>>();
         (
-            selected,
+            enabled,
             app_state.event_tx.clone(),
             app_state.stop_flag.clone(),
         )
@@ -356,7 +356,7 @@ fn handle_start_keyboard(app: &AppHandle, state: &SharedState) {
     // 启动提示音 — 仅在确实有勾选动作（真正进入循环）时播放；
     // 尽早调用（emit 之前），使音频设备初始化与 IPC 事件派发并行，降低感知延迟。
     // 空列表会在下方 worker 线程内立即回退 Idle，不算启动生效，不播放。
-    if !selected_actions.is_empty() {
+    if !enabled.is_empty() {
         crate::sound::play_start();
     }
 
@@ -374,12 +374,12 @@ fn handle_start_keyboard(app: &AppHandle, state: &SharedState) {
     let state_clone = state.clone();
     std::thread::spawn(move || {
         info!(
-            "[hotkeys_interception] keyboard simulation loop started, {} actions",
-            selected_actions.len()
+            "[hotkeys_interception] keyboard simulation loop started, {} configs",
+            enabled.len()
         );
 
-        if selected_actions.is_empty() {
-            info!("[hotkeys_interception] no selected keyboard actions, stopping immediately");
+        if enabled.is_empty() {
+            info!("[hotkeys_interception] no enabled keyboard configs, stopping immediately");
             if let Ok(mut s) = state_clone.lock() {
                 s.runtime_status = RuntimeStatus::Idle;
             }
@@ -390,15 +390,23 @@ fn handle_start_keyboard(app: &AppHandle, state: &SharedState) {
             return;
         }
 
-        // 构建动作序列：每个勾选按键 → Press 动作 + 执行后间隔（方案 B）
+        // 构建动作序列：每个启用配置 → 对应 Action + 执行后间隔
         let mut sequence = ActionSequence::new();
-        for action in &selected_actions {
-            sequence.add(
-                Action::Keyboard(KeyAction::Press {
-                    scan_code: action.scan_code,
+        for cfg in &enabled {
+            let action = match cfg.action_type {
+                crate::config::KeyActionType::Press => Action::Keyboard(KeyAction::Press {
+                    scan_code: cfg.scan_code,
                 }),
-                action.interval_ms,
-            );
+                crate::config::KeyActionType::Hold => Action::Keyboard(KeyAction::Hold {
+                    scan_code: cfg.scan_code,
+                    duration_ms: cfg.hold_duration_ms.unwrap_or(100),
+                }),
+                crate::config::KeyActionType::Combo => Action::Keyboard(KeyAction::Combo {
+                    modifiers: cfg.modifiers.clone(),
+                    key: cfg.scan_code,
+                }),
+            };
+            sequence.add(action, cfg.interval_ms);
         }
 
         // Scheduler 循环发送事件，间隔以 Delay 事件交由 worker 串行执行
@@ -406,13 +414,12 @@ fn handle_start_keyboard(app: &AppHandle, state: &SharedState) {
     });
 }
 
-/// 鼠标模拟启动分支 — DESIGN 10.2 / 阶段 15
+/// 鼠标模拟启动分支 — ARCHITECTURE v3.0 重构
 ///
-/// 列表为空或全部坐标为 null 时直接忽略热键：
-/// 不切状态、不发蒙版事件、不进入循环（用户需求 2026-06-10）。
+/// 列表为空或全部坐标为 null 时直接忽略热键。
 fn handle_start_mouse(app: &AppHandle, state: &SharedState) {
-    // 前置检查：先取出有效坐标，全空则直接返回
-    let valid_actions: Vec<crate::config::MouseAction> = {
+    // 前置检查：先取出有效配置
+    let valid: Vec<crate::config::MouseConfig> = {
         let app_state = match state.lock() {
             Ok(s) => s,
             Err(e) => {
@@ -425,25 +432,25 @@ fn handle_start_mouse(app: &AppHandle, state: &SharedState) {
         };
         app_state
             .config
-            .mouse_actions
+            .mouse_configs
             .iter()
-            .filter(|a| a.x.is_some() && a.y.is_some())
+            .filter(|c| c.enabled && c.x.is_some() && c.y.is_some())
             .cloned()
             .collect()
     };
 
-    if valid_actions.is_empty() {
+    if valid.is_empty() {
         info!(
-            "[hotkeys_interception] mouse start ignored: no valid coords (list empty or all null)"
+            "[hotkeys_interception] mouse start ignored: no valid configs (empty or all disabled/null)"
         );
         return;
     }
 
-    // 有有效坐标，正式启动模拟
+    // 有有效配置，正式启动模拟
     let new_status = RuntimeStatus::RunningMouse;
     info!(
-        "[hotkeys_interception] start triggered: -> RunningMouse, {} valid actions",
-        valid_actions.len()
+        "[hotkeys_interception] start triggered: -> RunningMouse, {} valid configs",
+        valid.len()
     );
 
     let (event_tx, stop_flag) = {
@@ -480,23 +487,58 @@ fn handle_start_mouse(app: &AppHandle, state: &SharedState) {
 
     std::thread::spawn(move || {
         info!(
-            "[hotkeys_interception] mouse simulation loop started, {} valid actions",
-            valid_actions.len()
+            "[hotkeys_interception] mouse simulation loop started, {} valid configs",
+            valid.len()
         );
 
-        // 构建动作序列：每个有效坐标 → 左键 Click 动作 + 执行后间隔（方案 B）
+        // 构建动作序列：每个有效配置 → 对应 MouseAction + 执行后间隔
         let mut sequence = ActionSequence::new();
-        for action in &valid_actions {
-            // valid_actions 已过滤 x/y 均为 Some
-            let (x, y) = (action.x.unwrap(), action.y.unwrap());
-            sequence.add(
-                Action::Mouse(MouseAction::Click {
-                    button: MouseButton::Left,
-                    x,
-                    y,
+        for cfg in &valid {
+            let action = match cfg.action_type {
+                crate::config::MouseActionType::ClickLeft => {
+                    let (x, y) = (cfg.x.unwrap(), cfg.y.unwrap());
+                    Action::Mouse(MouseAction::Click {
+                        button: MouseButton::Left,
+                        x,
+                        y,
+                    })
+                }
+                crate::config::MouseActionType::ClickRight => {
+                    let (x, y) = (cfg.x.unwrap(), cfg.y.unwrap());
+                    Action::Mouse(MouseAction::Click {
+                        button: MouseButton::Right,
+                        x,
+                        y,
+                    })
+                }
+                crate::config::MouseActionType::ClickMiddle => {
+                    let (x, y) = (cfg.x.unwrap(), cfg.y.unwrap());
+                    Action::Mouse(MouseAction::Click {
+                        button: MouseButton::Middle,
+                        x,
+                        y,
+                    })
+                }
+                crate::config::MouseActionType::ScrollUp => Action::Mouse(MouseAction::Scroll {
+                    delta: cfg.scroll_delta.unwrap_or(1),
                 }),
-                action.interval_ms,
-            );
+                crate::config::MouseActionType::ScrollDown => Action::Mouse(MouseAction::Scroll {
+                    delta: -cfg.scroll_delta.unwrap_or(1),
+                }),
+                crate::config::MouseActionType::Drag => {
+                    let from = (cfg.x.unwrap(), cfg.y.unwrap());
+                    let to = (
+                        cfg.drag_to_x.unwrap_or(from.0),
+                        cfg.drag_to_y.unwrap_or(from.1),
+                    );
+                    Action::Mouse(MouseAction::Drag {
+                        button: MouseButton::Left,
+                        from,
+                        to,
+                    })
+                }
+            };
+            sequence.add(action, cfg.interval_ms);
         }
 
         Scheduler::new(event_tx).execute_loop(&sequence, &stop_flag);

@@ -37,12 +37,13 @@ fn load_config(state: tauri::State<SharedState>) -> Result<AppConfig, String> {
     Ok(app_state.config.clone())
 }
 
-/// 保存配置命令 — 先落盘成功,再更新内存
+/// 持久化配置命令 — ARCHITECTURE v3.0 重构
 ///
-/// 阶段 12: 增加运行态守卫 — DESIGN 6.1
+/// 统一接口：保存到磁盘 + 更新内存 + 应用热键变更
+/// 包含运行态守卫（Running*/PickingMouse/Recording 时拒绝）
 #[tauri::command]
-fn save_config(config: AppConfig, state: tauri::State<SharedState>) -> Result<(), String> {
-    // 运行态守卫 — DESIGN 6.1
+fn persist_config(config: AppConfig, state: tauri::State<SharedState>) -> Result<(), String> {
+    // 运行态守卫
     {
         let app_state = state
             .inner()
@@ -61,7 +62,7 @@ fn save_config(config: AppConfig, state: tauri::State<SharedState>) -> Result<()
 
     // 先持久化，失败时内存状态不变
     config::save(&config).map_err(|e| {
-        log::error!("[save_config] persist failed: {}", e);
+        log::error!("[persist_config] persist failed: {}", e);
         e
     })?;
 
@@ -539,9 +540,9 @@ pub fn run() {
                 );
             } else {
                 log::info!(
-                    "[setup] config loaded: {} keyboard / {} mouse actions, hotkeys {} / {}",
-                    loaded_config.keyboard_actions.len(),
-                    loaded_config.mouse_actions.len(),
+                    "[setup] config loaded: {} keyboard / {} mouse configs, hotkeys {} / {}",
+                    loaded_config.keyboard_configs.len(),
+                    loaded_config.mouse_configs.len(),
                     loaded_config.hotkeys.start.key_label,
                     loaded_config.hotkeys.stop.key_label,
                 );
@@ -647,7 +648,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             load_config,
-            save_config,
+            persist_config,
             get_init_warning,
             get_admin_status,
             request_admin_restart,

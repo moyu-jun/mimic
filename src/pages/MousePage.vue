@@ -10,7 +10,7 @@ import { onMounted, onBeforeUnmount } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import { appStore } from '../stores/appStore'
-import type { MouseAction } from '../types/config'
+import type { MouseConfig } from '../types/config'
 import { persistConfig } from '../lib/configUtil'
 
 const DEFAULT_INTERVAL_MS = 20
@@ -23,7 +23,7 @@ onMounted(async () => {
     'mouse_position_picked',
     (event) => {
       const { rowId, x, y } = event.payload
-      const action = appStore.mouseActions.find(a => a.id === rowId)
+      const action = appStore.mouseConfigs.find(a => a.id === rowId)
       if (!action) return
       action.x = x
       action.y = y
@@ -39,25 +39,24 @@ onBeforeUnmount(() => {
 })
 
 function addAction(): void {
-  const newAction: MouseAction = {
+  const newConfig: MouseConfig = {
     id: `mouse-${Date.now()}`,
+    enabled: true,
+    actionType: 'click_left',
     x: null,
     y: null,
     intervalMs: DEFAULT_INTERVAL_MS,
   }
 
-  appStore.mouseActions.push(newAction)
+  appStore.mouseConfigs.push(newConfig)
 
-  // 结构性变更：立即持久化
-  persistConfig().catch(() => {
-    // 错误已在 configUtil 中记录，不阻塞用户操作
-  })
+  persistConfig().catch(() => {})
 }
 
 function deleteAction(id: string): void {
-  const idx = appStore.mouseActions.findIndex(a => a.id === id)
+  const idx = appStore.mouseConfigs.findIndex(a => a.id === id)
   if (idx !== -1) {
-    appStore.mouseActions.splice(idx, 1)
+    appStore.mouseConfigs.splice(idx, 1)
 
     // 结构性变更：立即持久化
     persistConfig().catch(() => {
@@ -66,7 +65,7 @@ function deleteAction(id: string): void {
   }
 }
 
-function onIntervalInput(action: MouseAction, e: Event): void {
+function onIntervalInput(action: MouseConfig, e: Event): void {
   const target = e.target as HTMLInputElement
   // 仅剥离非数字字符；允许中间态为空（用户清空后准备重新输入）
   const sanitized = target.value.replace(/[^0-9]/g, '')
@@ -75,7 +74,7 @@ function onIntervalInput(action: MouseAction, e: Event): void {
   if (!isNaN(num) && num > 0) action.intervalMs = num
 }
 
-function onIntervalCommit(action: MouseAction, e: Event): void {
+function onIntervalCommit(action: MouseConfig, e: Event): void {
   const target = e.target as HTMLInputElement
   const num = parseInt(target.value, 10)
   if (isNaN(num) || num <= 0) {
@@ -109,11 +108,11 @@ function startPickPosition(id: string): void {
         <div class="th">操作</div>
       </div>
 
-      <div v-if="!appStore.mouseActions.length" class="empty-hint">
+      <div v-if="!appStore.mouseConfigs.length" class="empty-hint">
         暂无鼠标动作
       </div>
       <div
-        v-for="action in appStore.mouseActions"
+        v-for="action in appStore.mouseConfigs"
         v-else
         :key="action.id"
         class="table-row"

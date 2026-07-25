@@ -2,13 +2,13 @@
 /**
  * 按键模拟页 — 需求 3.3.2 / DESIGN 15.6
  * 列表：勾选 / 键位 / 间隔 / 删除；顶部：捕获框 + 添加按钮。
- * 阶段 4 数据全部 mock 前端，阶段 8 起接 load_config / save_config。
+ * 数据通过 load_config 加载，persist_config 持久化。
  * 阶段 12：移除 onMounted/onBeforeUnmount 中的状态切换，由 set_current_page 统一管理。
  */
 import { ref, onBeforeUnmount } from 'vue'
 import { appStore } from '../stores/appStore'
 import KeyCaptureInput from '../components/KeyCaptureInput.vue'
-import type { CapturedKey, KeyboardAction } from '../types/config'
+import type { CapturedKey, KeyboardConfig } from '../types/config'
 import { persistConfig } from '../lib/configUtil'
 
 const DEFAULT_INTERVAL_MS = 20
@@ -30,7 +30,7 @@ function addAction(): void {
   if (!capturedKey.value) return
 
   // 已存在相同键位则拒绝添加并提示
-  const exists = appStore.keyboardActions.some(
+  const exists = appStore.keyboardConfigs.some(
     a => a.scanCode === capturedKey.value!.scanCode
   )
   if (exists) {
@@ -39,15 +39,16 @@ function addAction(): void {
     return
   }
 
-  const newAction: KeyboardAction = {
+  const newConfig: KeyboardConfig = {
     id: `kb-${Date.now()}`,
-    selected: false,
+    enabled: false,
+    actionType: 'press',
     keyLabel: capturedKey.value.keyLabel,
     scanCode: capturedKey.value.scanCode,
     intervalMs: DEFAULT_INTERVAL_MS,
   }
 
-  appStore.keyboardActions.push(newAction)
+  appStore.keyboardConfigs.push(newConfig)
   capturedKey.value = null
 
   // 结构性变更：立即持久化
@@ -57,9 +58,9 @@ function addAction(): void {
 }
 
 function deleteAction(id: string): void {
-  const idx = appStore.keyboardActions.findIndex(a => a.id === id)
+  const idx = appStore.keyboardConfigs.findIndex(a => a.id === id)
   if (idx !== -1) {
-    appStore.keyboardActions.splice(idx, 1)
+    appStore.keyboardConfigs.splice(idx, 1)
 
     // 结构性变更：立即持久化
     persistConfig().catch(() => {
@@ -69,9 +70,9 @@ function deleteAction(id: string): void {
 }
 
 function toggleSelected(id: string): void {
-  const action = appStore.keyboardActions.find(a => a.id === id)
+  const action = appStore.keyboardConfigs.find(a => a.id === id)
   if (action) {
-    action.selected = !action.selected
+    action.enabled = !action.enabled
 
     // 结构性变更：立即持久化
     persistConfig().catch(() => {
@@ -80,7 +81,7 @@ function toggleSelected(id: string): void {
   }
 }
 
-function onIntervalInput(action: KeyboardAction, e: Event): void {
+function onIntervalInput(action: KeyboardConfig, e: Event): void {
   const target = e.target as HTMLInputElement
   // 仅剥离非数字字符；允许中间态为空（用户清空后准备重新输入）
   const sanitized = target.value.replace(/[^0-9]/g, '')
@@ -89,7 +90,7 @@ function onIntervalInput(action: KeyboardAction, e: Event): void {
   if (!isNaN(num) && num > 0) action.intervalMs = num
 }
 
-function onIntervalCommit(action: KeyboardAction, e: Event): void {
+function onIntervalCommit(action: KeyboardConfig, e: Event): void {
   const target = e.target as HTMLInputElement
   const num = parseInt(target.value, 10)
   if (isNaN(num) || num <= 0) {
@@ -125,21 +126,21 @@ onBeforeUnmount(() => {
     </header>
 
     <div class="list-container">
-      <div v-if="!appStore.keyboardActions.length" class="empty-hint">
+      <div v-if="!appStore.keyboardConfigs.length" class="empty-hint">
         暂无按键动作
       </div>
       <div v-else class="list-scroll">
         <div
-          v-for="action in appStore.keyboardActions"
+          v-for="action in appStore.keyboardConfigs"
           :key="action.id"
           class="list-row"
-          :class="{ unselected: !action.selected }"
+          :class="{ disabled: !action.enabled }"
         >
           <label class="checkbox-wrapper">
             <input
               type="checkbox"
               class="checkbox"
-              :checked="action.selected"
+              :checked="action.enabled"
               :aria-label="`选择 ${action.keyLabel} 按键动作`"
               @change="toggleSelected(action.id)"
             />
@@ -269,7 +270,7 @@ onBeforeUnmount(() => {
   transition: opacity var(--transition-fast) var(--ease-default);
 }
 
-.list-row.unselected {
+.list-row.disabled {
   opacity: 0.5;
 }
 
