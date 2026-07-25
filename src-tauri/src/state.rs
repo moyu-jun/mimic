@@ -85,10 +85,9 @@ pub struct AppState {
     pub interception_listener: Arc<Mutex<Option<SendInterception>>>,
     /// 模拟专用 context（仅 send，非阻塞）
     pub interception_worker: Arc<Mutex<Option<SendInterception>>>,
-    /// 按键模拟事件发送器（阶段 13）— DESIGN 8.4
-    pub action_tx: SyncSender<crate::keyboard_worker::ActionEvent>,
-    /// 鼠标模拟事件发送器（阶段 15）— DESIGN 10.2
-    pub mouse_tx: SyncSender<crate::mouse_worker::MouseEvent>,
+    /// 统一模拟事件发送器 — ARCHITECTURE v2.0
+    /// 键盘/鼠标统一走此 channel，由 simulation_worker 消费。
+    pub event_tx: SyncSender<crate::simulation::event::SimulationEvent>,
     /// 提示音录制句柄（阶段 18）— Some 表示录制进行中，由录制线程管理
     pub recording: crate::sound_recorder::RecordingHandle,
     /// 录制完成待剪裁的 PCM 缓冲（阶段 18 剪裁）— (samples, sampleRate)

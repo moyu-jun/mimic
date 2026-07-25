@@ -3,6 +3,11 @@
 // 基于 Interception 驱动实现全局热键监听，支持所有按键包括修饰键（Ctrl/Alt/Shift）。
 // 替代 tauri-plugin-global-shortcut 以突破 Windows RegisterHotKey API 限制。
 
+use crate::simulation::action::{Action, ActionSequence};
+use crate::simulation::event::MouseButton;
+use crate::simulation::executor::Scheduler;
+use crate::simulation::keyboard::KeyAction;
+use crate::simulation::mouse::MouseAction;
 use crate::state::{RuntimeStatus, SendInterception, SharedState};
 use interception::{KeyState, ScanCode, Stroke};
 use log::{error, info};
@@ -319,7 +324,7 @@ fn handle_start_keyboard(app: &AppHandle, state: &SharedState) {
     let new_status = RuntimeStatus::RunningKeyboard;
     info!("[hotkeys_interception] start triggered: Idle -> RunningKeyboard");
 
-    let (selected_actions, action_tx, stop_flag) = {
+    let (selected_actions, event_tx, stop_flag) = {
         let mut app_state = match state.lock() {
             Ok(s) => s,
             Err(e) => {
@@ -343,7 +348,7 @@ fn handle_start_keyboard(app: &AppHandle, state: &SharedState) {
             .collect::<Vec<_>>();
         (
             selected,
-            app_state.action_tx.clone(),
+            app_state.event_tx.clone(),
             app_state.stop_flag.clone(),
         )
     };
@@ -385,36 +390,19 @@ fn handle_start_keyboard(app: &AppHandle, state: &SharedState) {
             return;
         }
 
-        loop {
-            for action in &selected_actions {
-                macro_rules! check_stop {
-                    () => {
-                        if stop_flag.load(std::sync::atomic::Ordering::Relaxed) {
-                            info!(
-                                "[hotkeys_interception] stop_flag detected, exiting keyboard loop"
-                            );
-                            return;
-                        }
-                    };
-                }
-                check_stop!();
-                if let Err(e) = action_tx.send(crate::keyboard_worker::ActionEvent::KeyPress {
+        // 构建动作序列：每个勾选按键 → Press 动作 + 执行后间隔（方案 B）
+        let mut sequence = ActionSequence::new();
+        for action in &selected_actions {
+            sequence.add(
+                Action::Keyboard(KeyAction::Press {
                     scan_code: action.scan_code,
-                }) {
-                    error!("[hotkeys_interception] failed to send KeyPress: {}", e);
-                    return;
-                }
-                check_stop!();
-                if let Err(e) = action_tx.send(crate::keyboard_worker::ActionEvent::KeyRelease {
-                    scan_code: action.scan_code,
-                }) {
-                    error!("[hotkeys_interception] failed to send KeyRelease: {}", e);
-                    return;
-                }
-                check_stop!();
-                std::thread::sleep(std::time::Duration::from_millis(action.interval_ms));
-            }
+                }),
+                action.interval_ms,
+            );
         }
+
+        // Scheduler 循环发送事件，间隔以 Delay 事件交由 worker 串行执行
+        Scheduler::new(event_tx).execute_loop(&sequence, &stop_flag);
     });
 }
 
@@ -458,7 +446,7 @@ fn handle_start_mouse(app: &AppHandle, state: &SharedState) {
         valid_actions.len()
     );
 
-    let (mouse_tx, stop_flag) = {
+    let (event_tx, stop_flag) = {
         let mut app_state = match state.lock() {
             Ok(s) => s,
             Err(e) => {
@@ -473,7 +461,7 @@ fn handle_start_mouse(app: &AppHandle, state: &SharedState) {
         app_state
             .stop_flag
             .store(false, std::sync::atomic::Ordering::Relaxed);
-        (app_state.mouse_tx.clone(), app_state.stop_flag.clone())
+        (app_state.event_tx.clone(), app_state.stop_flag.clone())
     };
 
     // 启动提示音 — 已确认有有效坐标，真正进入鼠标模拟循环。
@@ -496,26 +484,22 @@ fn handle_start_mouse(app: &AppHandle, state: &SharedState) {
             valid_actions.len()
         );
 
-        loop {
-            for action in &valid_actions {
-                macro_rules! check_stop {
-                    () => {
-                        if stop_flag.load(std::sync::atomic::Ordering::Relaxed) {
-                            info!("[hotkeys_interception] stop_flag detected, exiting mouse loop");
-                            return;
-                        }
-                    };
-                }
-                let (x, y) = (action.x.unwrap(), action.y.unwrap());
-                check_stop!();
-                if let Err(e) = mouse_tx.send(crate::mouse_worker::MouseEvent::Click { x, y }) {
-                    error!("[hotkeys_interception] failed to send MouseClick: {}", e);
-                    return;
-                }
-                check_stop!();
-                std::thread::sleep(std::time::Duration::from_millis(action.interval_ms));
-            }
+        // 构建动作序列：每个有效坐标 → 左键 Click 动作 + 执行后间隔（方案 B）
+        let mut sequence = ActionSequence::new();
+        for action in &valid_actions {
+            // valid_actions 已过滤 x/y 均为 Some
+            let (x, y) = (action.x.unwrap(), action.y.unwrap());
+            sequence.add(
+                Action::Mouse(MouseAction::Click {
+                    button: MouseButton::Left,
+                    x,
+                    y,
+                }),
+                action.interval_ms,
+            );
         }
+
+        Scheduler::new(event_tx).execute_loop(&sequence, &stop_flag);
     });
 }
 

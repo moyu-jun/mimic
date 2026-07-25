@@ -11,17 +11,16 @@ mod config;
 mod driver;
 mod hotkeys;
 mod hotkeys_interception;
-mod keyboard_worker;
 mod mouse_picker;
-mod mouse_worker;
+mod simulation;
+mod simulation_worker;
 mod sound;
 mod sound_recorder;
 mod state;
 
 use config::AppConfig;
 use hotkeys::HotkeyUpdateResult;
-use keyboard_worker::ActionEvent;
-use mouse_worker::MouseEvent;
+use simulation::event::SimulationEvent;
 use state::{AppState, RuntimeStatus, SendInterception, SharedState};
 use std::sync::atomic::AtomicBool;
 use std::sync::{mpsc, Arc, Mutex};
@@ -595,12 +594,10 @@ pub fn run() {
                 Arc::new(Mutex::new(None))
             };
 
-            // 创建按键模拟 channel — DESIGN 8.4 / 阶段 13
-            // 使用有界通道（容量 32）防止生产者-消费者失衡时内存泄漏
-            let (action_tx, action_rx) = mpsc::sync_channel::<ActionEvent>(32);
-
-            // 创建鼠标模拟 channel — DESIGN 10.2 / 阶段 15
-            let (mouse_tx, mouse_rx) = mpsc::sync_channel::<MouseEvent>(32);
+            // 创建统一模拟事件 channel — ARCHITECTURE v2.0
+            // 键盘/鼠标事件统一走此 channel。有界通道防止生产者-消费者失衡时内存泄漏；
+            // 容量放宽到 1024，因单个动作会展开为多个事件（含 Delay），避免高频序列阻塞生产者。
+            let (event_tx, event_rx) = mpsc::sync_channel::<SimulationEvent>(1024);
 
             // 启动 Interception 热键监听线程 — DESIGN 8.3 / 阶段 13
             let shared_state: SharedState = Arc::new(Mutex::new(AppState {
@@ -613,8 +610,7 @@ pub fn run() {
                 pick_row_id: None,
                 interception_listener: listener_ctx.clone(),
                 interception_worker: worker_ctx.clone(),
-                action_tx: action_tx.clone(),
-                mouse_tx: mouse_tx.clone(),
+                event_tx: event_tx.clone(),
                 recording: sound_recorder::new_handle(),
                 recording_buffer: Arc::new(Mutex::new(None)),
             }));
@@ -630,26 +626,15 @@ pub fn run() {
                     log::info!("[setup] Interception hotkey listener started");
                 }
 
-                // 启动按键模拟 worker 线程 — DESIGN 8.4 / 阶段 13
-                if let Err(e) = keyboard_worker::start_keyboard_worker(
-                    action_rx,
+                // 启动统一模拟 worker 线程 — ARCHITECTURE v2.0
+                if let Err(e) = simulation_worker::start_simulation_worker(
+                    event_rx,
                     shared_state.clone(),
                     worker_ctx.clone(),
                 ) {
-                    log::error!("[setup] keyboard worker failed: {}", e);
+                    log::error!("[setup] simulation worker failed: {}", e);
                 } else {
-                    log::info!("[setup] keyboard worker started");
-                }
-
-                // 启动鼠标模拟 worker 线程 — DESIGN 10.2 / 阶段 15
-                if let Err(e) = mouse_worker::start_mouse_worker(
-                    mouse_rx,
-                    shared_state.clone(),
-                    worker_ctx.clone(),
-                ) {
-                    log::error!("[setup] mouse worker failed: {}", e);
-                } else {
-                    log::info!("[setup] mouse worker started");
+                    log::info!("[setup] simulation worker started");
                 }
             } else {
                 log::warn!("[setup] Interception not ready, hotkeys and simulation disabled");
