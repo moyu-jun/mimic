@@ -26,19 +26,30 @@ impl SimulationRunner {
     ///   4. spawn 生产者线程：Scheduler::execute_loop(sequence, stop_flag)
     pub fn start(app: &AppHandle, state: &SharedState, builder: &dyn SequenceBuilder) {
         let new_status = builder.running_status();
+        info!("[runner] start called: target_status={:?}", new_status);
 
         // 先构建序列并取出运行所需句柄；None 表示无有效动作，静默忽略本次启动。
         let (sequence, event_tx, stop_flag) = {
             let mut app_state = match state.lock() {
-                Ok(s) => s,
+                Ok(s) => {
+                    info!(
+                        "[runner] current state: page={}, status={:?}, active_custom_id={:?}",
+                        s.current_page, s.runtime_status, s.active_custom_sequence_id
+                    );
+                    s
+                }
                 Err(e) => {
                     error!("[runner] start: failed to lock state: {}", e);
                     return;
                 }
             };
 
+            info!("[runner] calling builder.build()...");
             let sequence = match builder.build(&app_state.config) {
-                Some(seq) => seq,
+                Some(seq) => {
+                    info!("[runner] builder.build() returned {} steps", seq.steps.len());
+                    seq
+                }
                 None => {
                     info!("[runner] start ignored: builder produced no valid actions");
                     return;

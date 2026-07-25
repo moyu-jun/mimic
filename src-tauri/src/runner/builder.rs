@@ -142,25 +142,74 @@ pub struct CustomSequenceBuilder {
 
 impl SequenceBuilder for CustomSequenceBuilder {
     fn build(&self, config: &AppConfig) -> Option<ActionSequence> {
+        log::info!(
+            "[CustomSequenceBuilder] build called: sequence_id={}, total_sequences={}",
+            self.sequence_id,
+            config.custom_sequences.len()
+        );
+
         let seq_cfg = config
             .custom_sequences
             .iter()
             .find(|s| s.id == self.sequence_id)?;
 
+        log::info!(
+            "[CustomSequenceBuilder] found sequence: name='{}', actions={}",
+            seq_cfg.name,
+            seq_cfg.actions.len()
+        );
+
         let mut sequence = ActionSequence::new();
-        for action in &seq_cfg.actions {
+        for (idx, action) in seq_cfg.actions.iter().enumerate() {
             match action {
                 CustomAction::Keyboard(cfg) if cfg.enabled => {
+                    log::info!(
+                        "[CustomSequenceBuilder] action[{}]: Keyboard enabled, key={}, interval={}",
+                        idx,
+                        cfg.key_label,
+                        cfg.interval_ms
+                    );
                     sequence.add(keyboard_config_to_action(cfg), cfg.interval_ms);
                 }
                 CustomAction::Mouse(cfg) if cfg.enabled => {
+                    log::info!(
+                        "[CustomSequenceBuilder] action[{}]: Mouse enabled, type={:?}, x={:?}, y={:?}, interval={}",
+                        idx,
+                        cfg.action_type,
+                        cfg.x,
+                        cfg.y,
+                        cfg.interval_ms
+                    );
                     if let Some(a) = mouse_config_to_action(cfg) {
                         sequence.add(a, cfg.interval_ms);
+                    } else {
+                        log::warn!(
+                            "[CustomSequenceBuilder] action[{}]: Mouse coords invalid, skipped",
+                            idx
+                        );
                     }
                 }
-                _ => {} // 未勾选，跳过
+                CustomAction::Keyboard(cfg) => {
+                    log::info!(
+                        "[CustomSequenceBuilder] action[{}]: Keyboard disabled, key={}, skipped",
+                        idx,
+                        cfg.key_label
+                    );
+                }
+                CustomAction::Mouse(cfg) => {
+                    log::info!(
+                        "[CustomSequenceBuilder] action[{}]: Mouse disabled, type={:?}, skipped",
+                        idx,
+                        cfg.action_type
+                    );
+                }
             }
         }
+
+        log::info!(
+            "[CustomSequenceBuilder] build result: {} valid steps",
+            sequence.steps.len()
+        );
 
         if sequence.is_empty() {
             None
