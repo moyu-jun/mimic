@@ -1,20 +1,11 @@
-// 鼠标动作类型 — ARCHITECTURE v2.0
+// 鼠标动作类型 — ARCHITECTURE v3.0
 //
 // MouseAction 是业务层可理解的鼠标操作单元，会被展开为一系列原子 SimulationEvent。
 
 use crate::simulation::event::{MouseButton, SimulationEvent};
-
-/// 点击时移动到位后按下前的稳定延迟（毫秒）
-const CLICK_SETTLE_MS: u64 = 5;
-
-/// 点击时按下到释放的延迟（毫秒）
-const CLICK_HOLD_MS: u64 = 10;
-
-/// 拖拽时移动到位后的稳定延迟（毫秒）
-const DRAG_MOVE_MS: u64 = 10;
-
-/// 拖拽时按下后开始移动前的延迟（毫秒）
-const DRAG_PRESS_MS: u64 = 20;
+use crate::simulation::timing::{
+    MOUSE_CLICK_HOLD_MS, MOUSE_CLICK_SETTLE_MS, MOUSE_DRAG_MOVE_MS, MOUSE_DRAG_PRESS_MS,
+};
 
 /// 鼠标动作类型
 #[derive(Debug, Clone)]
@@ -65,10 +56,12 @@ impl MouseAction {
             MouseAction::Click { button, x, y } => vec![
                 SimulationEvent::MouseMove { x: *x, y: *y },
                 SimulationEvent::Delay {
-                    ms: CLICK_SETTLE_MS,
+                    ms: MOUSE_CLICK_SETTLE_MS,
                 },
                 SimulationEvent::MouseButtonDown { button: *button },
-                SimulationEvent::Delay { ms: CLICK_HOLD_MS },
+                SimulationEvent::Delay {
+                    ms: MOUSE_CLICK_HOLD_MS,
+                },
                 SimulationEvent::MouseButtonUp { button: *button },
             ],
 
@@ -98,11 +91,17 @@ impl MouseAction {
                     x: from.0,
                     y: from.1,
                 },
-                SimulationEvent::Delay { ms: DRAG_MOVE_MS },
+                SimulationEvent::Delay {
+                    ms: MOUSE_DRAG_MOVE_MS,
+                },
                 SimulationEvent::MouseButtonDown { button: *button },
-                SimulationEvent::Delay { ms: DRAG_PRESS_MS },
+                SimulationEvent::Delay {
+                    ms: MOUSE_DRAG_PRESS_MS,
+                },
                 SimulationEvent::MouseMove { x: to.0, y: to.1 },
-                SimulationEvent::Delay { ms: DRAG_MOVE_MS },
+                SimulationEvent::Delay {
+                    ms: MOUSE_DRAG_MOVE_MS,
+                },
                 SimulationEvent::MouseButtonUp { button: *button },
             ],
         }

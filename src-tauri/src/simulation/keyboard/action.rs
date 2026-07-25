@@ -1,14 +1,9 @@
-// 键盘动作类型 — ARCHITECTURE v2.0
+// 键盘动作类型 — ARCHITECTURE v3.0
 //
 // KeyAction 是业务层可理解的键盘操作单元，会被展开为一系列原子 SimulationEvent。
 
 use crate::simulation::event::SimulationEvent;
-
-/// 单次按键内部的按下→释放延迟（毫秒）
-const PRESS_HOLD_MS: u64 = 10;
-
-/// 组合键中每个修饰键之间的延迟（毫秒）
-const COMBO_STEP_MS: u64 = 5;
+use crate::simulation::timing::{KEY_COMBO_STEP_MS, KEY_PRESS_HOLD_MS};
 
 /// 键盘动作类型
 #[derive(Debug, Clone)]
@@ -41,7 +36,9 @@ impl KeyAction {
                 SimulationEvent::KeyDown {
                     scan_code: *scan_code,
                 },
-                SimulationEvent::Delay { ms: PRESS_HOLD_MS },
+                SimulationEvent::Delay {
+                    ms: KEY_PRESS_HOLD_MS,
+                },
                 SimulationEvent::KeyUp {
                     scan_code: *scan_code,
                 },
@@ -73,15 +70,21 @@ impl KeyAction {
                 // 按下所有修饰键
                 for &m in modifiers {
                     events.push(SimulationEvent::KeyDown { scan_code: m });
-                    events.push(SimulationEvent::Delay { ms: COMBO_STEP_MS });
+                    events.push(SimulationEvent::Delay {
+                        ms: KEY_COMBO_STEP_MS,
+                    });
                 }
                 // 按下目标键
                 events.push(SimulationEvent::KeyDown { scan_code: *key });
-                events.push(SimulationEvent::Delay { ms: PRESS_HOLD_MS });
+                events.push(SimulationEvent::Delay {
+                    ms: KEY_PRESS_HOLD_MS,
+                });
                 events.push(SimulationEvent::KeyUp { scan_code: *key });
                 // 逆序释放修饰键
                 for &m in modifiers.iter().rev() {
-                    events.push(SimulationEvent::Delay { ms: COMBO_STEP_MS });
+                    events.push(SimulationEvent::Delay {
+                        ms: KEY_COMBO_STEP_MS,
+                    });
                     events.push(SimulationEvent::KeyUp { scan_code: m });
                 }
                 events

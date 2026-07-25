@@ -1,4 +1,4 @@
-// 序列调度器 — ARCHITECTURE v2.0
+// 序列调度器 — ARCHITECTURE v3.0
 //
 // 方案 B 核心：生产者只负责展开动作、发送事件，不自己 sleep；
 // 步骤间隔也转换为 Delay 事件发给 worker，由 worker 单线程串行执行，保证时序精确。

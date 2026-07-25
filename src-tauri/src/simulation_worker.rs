@@ -1,4 +1,4 @@
-// 统一模拟 Worker — ARCHITECTURE v2.0
+// 统一模拟 Worker — ARCHITECTURE v3.0
 //
 // 常驻后台线程，替代旧的 keyboard_worker / mouse_worker，职责：
 //   1. 从 channel 接收 SimulationEvent

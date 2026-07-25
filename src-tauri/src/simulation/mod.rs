@@ -1,4 +1,4 @@
-// 模拟模块根 — ARCHITECTURE v2.0（方案 B：双线程 + 统一延迟模型）
+// 模拟模块根 — ARCHITECTURE v3.0（方案 B：双线程 + 统一延迟模型）
 //
 // 职责分层：
 //   - event    : 统一原子事件 SimulationEvent（驱动层）
@@ -7,6 +7,7 @@
 //   - mouse    : 鼠标动作类型 MouseAction + 坐标转换 CoordinateMapper
 //   - driver   : InputDriver trait + InterceptionDriver 实现（驱动抽象层）
 //   - executor : Scheduler 序列调度器（生产者逻辑）
+//   - timing   : 统一时序常量（v3.0 新增）
 //
 // worker 消费端见 crate::simulation_worker。
 
@@ -16,3 +17,4 @@ pub mod event;
 pub mod executor;
 pub mod keyboard;
 pub mod mouse;
+pub mod timing;

@@ -1,4 +1,4 @@
-// 键盘模拟模块 — ARCHITECTURE v2.0
+// 键盘模拟模块 — ARCHITECTURE v3.0
 
 mod action;
 

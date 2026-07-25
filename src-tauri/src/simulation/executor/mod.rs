@@ -1,4 +1,4 @@
-// 执行器（序列调度） — ARCHITECTURE v2.0
+// 执行器（序列调度） — ARCHITECTURE v3.0
 
 mod scheduler;
 

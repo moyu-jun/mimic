@@ -1,4 +1,4 @@
-// 统一模拟事件定义 — ARCHITECTURE v2.0
+// 统一模拟事件定义 — ARCHITECTURE v3.0
 //
 // SimulationEvent 是驱动层的原子事件，worker 接收后直接调用驱动 API。
 // 所有延迟（动作内部 + 步骤间隔）统一用 Delay 事件表示，由 worker 单线程串行执行，
