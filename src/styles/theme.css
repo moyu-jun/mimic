@@ -39,8 +39,8 @@
   --danger:         var(--color-error-warm);
 
   /* === 布局尺寸 === */
-  --window-width: 600px;
-  --window-height: 400px;
+  --window-width: 800px;
+  --window-height: 600px;
   --window-radius: 12px;
   --titlebar-height: 40px;
   --sidebar-width: 180px;
