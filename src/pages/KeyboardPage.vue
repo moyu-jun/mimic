@@ -163,17 +163,19 @@ onBeforeUnmount(() => {
             />
           </label>
           <span class="key-badge">{{ action.keyLabel }}</span>
-          <span class="interval-label">间隔</span>
-          <input
-            type="text"
-            inputmode="numeric"
-            class="interval-input"
-            :value="action.intervalMs"
-            @input="onIntervalInput(action, $event)"
-            @blur="onIntervalCommit(action, $event)"
-            @keydown.enter="onIntervalCommit(action, $event)"
-          />
-          <span class="unit">ms</span>
+          <div class="interval-group">
+            <span class="interval-label">间隔</span>
+            <input
+              type="text"
+              inputmode="numeric"
+              class="interval-input"
+              :value="action.intervalMs"
+              @input="onIntervalInput(action, $event)"
+              @blur="onIntervalCommit(action, $event)"
+              @keydown.enter="onIntervalCommit(action, $event)"
+            />
+            <span class="unit">ms</span>
+          </div>
           <button
             type="button"
             class="move-btn"
@@ -305,7 +307,7 @@ onBeforeUnmount(() => {
 .list-scroll {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 8px;
   overflow-y: auto;
   scrollbar-gutter: stable;
 }
@@ -313,14 +315,14 @@ onBeforeUnmount(() => {
 .list-row {
   display: flex;
   align-items: center;
-  gap: 12px;
-  height: 40px;
-  min-height: 40px;
+  gap: 16px;
+  height: 44px;
+  min-height: 44px;
   flex-shrink: 0;
-  padding: 0 14px;
+  padding: 0 18px;
   background: var(--bg-secondary);
   border: 1px solid var(--border-subtle);
-  border-radius: 7px;
+  border-radius: 8px;
   transition: opacity var(--transition-fast) var(--ease-default);
 }
 
@@ -335,41 +337,53 @@ onBeforeUnmount(() => {
 }
 
 .checkbox {
-  width: 16px;
-  height: 16px;
+  width: 18px;
+  height: 18px;
   cursor: pointer;
   accent-color: var(--accent);
 }
 
 .key-badge {
-  min-width: 80px;
-  height: 26px;
+  min-width: 100px;
+  height: 30px;
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 0 12px;
-  border-radius: 5px;
+  padding: 0 16px;
+  border-radius: 6px;
   background: var(--bg-elevated);
   border: 1px solid var(--border-subtle);
-  font-size: 13px;
+  font-size: 15px;
   font-weight: 600;
   color: var(--text-primary);
+  letter-spacing: 0.5px;
+}
+
+.interval-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+  padding: 5px 14px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  border-radius: 16px;
 }
 
 .interval-label {
   font-size: 12px;
   color: var(--text-secondary);
-  margin-left: auto;
 }
 
 .interval-input {
-  width: 60px;
-  height: 24px;
+  width: 84px;
+  height: 26px;
   padding: 0 8px;
-  background: var(--bg-elevated);
+  background: var(--bg-secondary);
   border: 1px solid var(--border-subtle);
   border-radius: 5px;
-  font-size: 12px;
+  font-size: 13px;
+  font-weight: 500;
   color: var(--text-primary);
   text-align: center;
   transition: border-color var(--transition-fast) var(--ease-default);
@@ -381,8 +395,9 @@ onBeforeUnmount(() => {
 }
 
 .unit {
-  font-size: 11px;
+  font-size: 12px;
   color: var(--text-disabled);
+  font-weight: 500;
 }
 
 .move-btn,
@@ -390,9 +405,9 @@ onBeforeUnmount(() => {
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 24px;
-  height: 24px;
-  border-radius: 5px;
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
   color: var(--text-secondary);
   transition:
     background var(--transition-fast) var(--ease-default),
