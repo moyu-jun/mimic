@@ -4,9 +4,7 @@
 // 每种模拟模式（键盘 / 鼠标 / 未来混合）实现一个 builder。
 // 新增模式 = 新增一个 builder，监听层与 runner 完全不用改。
 
-use crate::config::{
-    AppConfig, CustomAction, KeyActionType, KeyboardConfig, MouseActionType, MouseConfig,
-};
+use crate::config::{AppConfig, CustomAction, KeyboardConfig, MouseActionType, MouseConfig};
 use crate::simulation::action::{Action, ActionSequence};
 use crate::simulation::event::MouseButton;
 use crate::simulation::keyboard::KeyAction;
@@ -23,21 +21,11 @@ pub trait SequenceBuilder {
     fn running_status(&self) -> RuntimeStatus;
 }
 
-/// KeyboardConfig → Action（键盘三种动作类型）。供键盘/自定义 builder 共用。
+/// KeyboardConfig → Action（仅支持 Press 操作）。供键盘/自定义 builder 共用。
 fn keyboard_config_to_action(cfg: &KeyboardConfig) -> Action {
-    match cfg.action_type {
-        KeyActionType::Press => Action::Keyboard(KeyAction::Press {
-            scan_code: cfg.scan_code,
-        }),
-        KeyActionType::Hold => Action::Keyboard(KeyAction::Hold {
-            scan_code: cfg.scan_code,
-            duration_ms: cfg.hold_duration_ms.unwrap_or(100),
-        }),
-        KeyActionType::Combo => Action::Keyboard(KeyAction::Combo {
-            modifiers: cfg.modifiers.clone(),
-            key: cfg.scan_code,
-        }),
-    }
+    Action::Keyboard(KeyAction::Press {
+        scan_code: cfg.scan_code,
+    })
 }
 
 /// MouseConfig → Action；坐标全空返回 None（无效动作）。供鼠标/自定义 builder 共用。
@@ -246,15 +234,12 @@ mod tests {
         }
     }
 
-    fn kb(enabled: bool, action_type: KeyActionType) -> KeyboardConfig {
+    fn kb(enabled: bool) -> KeyboardConfig {
         KeyboardConfig {
             id: "k".to_string(),
             enabled,
-            action_type,
             key_label: "F".to_string(),
             scan_code: 33,
-            hold_duration_ms: None,
-            modifiers: Vec::new(),
             interval_ms: 20,
         }
     }
@@ -281,17 +266,14 @@ mod tests {
     #[test]
     fn keyboard_all_disabled_returns_none() {
         let mut cfg = empty_config();
-        cfg.keyboard_configs = vec![kb(false, KeyActionType::Press)];
+        cfg.keyboard_configs = vec![kb(false)];
         assert!(KeyboardSequenceBuilder.build(&cfg).is_none());
     }
 
     #[test]
     fn keyboard_enabled_builds_steps() {
         let mut cfg = empty_config();
-        cfg.keyboard_configs = vec![
-            kb(true, KeyActionType::Press),
-            kb(false, KeyActionType::Hold),
-        ];
+        cfg.keyboard_configs = vec![kb(true), kb(false)];
         let seq = KeyboardSequenceBuilder.build(&cfg).unwrap();
         assert_eq!(seq.steps.len(), 1);
     }
@@ -347,7 +329,7 @@ mod tests {
         cfg.custom_sequences = vec![CustomSequence {
             id: "seq-1".to_string(),
             name: "s".to_string(),
-            actions: vec![CustomAction::Keyboard(kb(true, KeyActionType::Press))],
+            actions: vec![CustomAction::Keyboard(kb(true))],
         }];
         // 激活 id 与任何序列都不匹配 → None
         assert!(custom_builder("nope").build(&cfg).is_none());
@@ -371,10 +353,10 @@ mod tests {
             id: "seq-1".to_string(),
             name: "s".to_string(),
             actions: vec![
-                CustomAction::Keyboard(kb(true, KeyActionType::Press)), // 有效
-                CustomAction::Mouse(ms(true, None, None)),              // 坐标全空 → 跳过
-                CustomAction::Mouse(ms(true, Some(10), Some(20))),      // 有效
-                CustomAction::Keyboard(kb(false, KeyActionType::Press)), // 未勾选 → 跳过
+                CustomAction::Keyboard(kb(true)),                  // 有效
+                CustomAction::Mouse(ms(true, None, None)),         // 坐标全空 → 跳过
+                CustomAction::Mouse(ms(true, Some(10), Some(20))), // 有效
+                CustomAction::Keyboard(kb(false)),                 // 未勾选 → 跳过
             ],
         }];
         let seq = custom_builder("seq-1").build(&cfg).unwrap();

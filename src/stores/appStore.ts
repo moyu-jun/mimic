@@ -18,7 +18,6 @@ export const appStore = reactive({
     {
       id: 'default-keyboard-1',
       enabled: true,
-      actionType: 'press' as const,
       keyLabel: 'F',
       scanCode: 33,
       intervalMs: 20,

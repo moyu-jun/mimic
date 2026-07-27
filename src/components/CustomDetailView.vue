@@ -96,7 +96,6 @@ function addKeyboardAction(): void {
     kind: 'keyboard',
     id: `ck-${Date.now()}`,
     enabled: true,
-    actionType: 'press',
     keyLabel: capturedKey.value.keyLabel,
     scanCode: capturedKey.value.scanCode,
     intervalMs: DEFAULT_INTERVAL_MS,

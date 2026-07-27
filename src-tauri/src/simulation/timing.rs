@@ -6,7 +6,7 @@
 // === 键盘时序 ===
 
 /// 单次按键内部的按下→释放延迟（毫秒）
-pub const KEY_PRESS_HOLD_MS: u64 = 10;
+pub const KEY_PRESS_HOLD_MS: u64 = 1;
 
 /// 组合键中每个修饰键之间的延迟（毫秒）
 pub const KEY_COMBO_STEP_MS: u64 = 5;

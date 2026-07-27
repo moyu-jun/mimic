@@ -30,9 +30,6 @@ export type DriverStatus =
   | 'Ready'
   | 'Error'
 
-/** 键盘动作类型 */
-export type KeyActionType = 'press' | 'hold' | 'combo'
-
 /** 鼠标动作类型 */
 export type MouseActionType =
   | 'click_left'
@@ -52,11 +49,8 @@ export interface CapturedKey {
 export interface KeyboardConfig {
   id: string
   enabled: boolean
-  actionType: KeyActionType
   keyLabel: string
   scanCode: number
-  holdDurationMs?: number
-  modifiers?: number[]
   intervalMs: number
 }
 

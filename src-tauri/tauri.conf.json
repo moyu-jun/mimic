@@ -13,8 +13,8 @@
     "windows": [
       {
         "title": "Mimic",
-        "width": 600,
-        "height": 400,
+        "width": 800,
+        "height": 600,
         "resizable": false,
         "maximizable": false,
         "minimizable": true,

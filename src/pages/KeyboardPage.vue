@@ -42,7 +42,6 @@ function addAction(): void {
   const newConfig: KeyboardConfig = {
     id: `kb-${Date.now()}`,
     enabled: false,
-    actionType: 'press',
     keyLabel: capturedKey.value.keyLabel,
     scanCode: capturedKey.value.scanCode,
     intervalMs: DEFAULT_INTERVAL_MS,
@@ -106,6 +105,24 @@ function onIntervalCommit(action: KeyboardConfig, e: Event): void {
   })
 }
 
+function moveUp(index: number): void {
+  if (index <= 0) return
+  const arr = appStore.keyboardConfigs
+  ;[arr[index - 1], arr[index]] = [arr[index], arr[index - 1]]
+  persistConfig().catch(() => {
+    // 错误已在 configUtil 中记录，不阻塞用户操作
+  })
+}
+
+function moveDown(index: number): void {
+  if (index >= appStore.keyboardConfigs.length - 1) return
+  const arr = appStore.keyboardConfigs
+  ;[arr[index + 1], arr[index]] = [arr[index], arr[index + 1]]
+  persistConfig().catch(() => {
+    // 错误已在 configUtil 中记录，不阻塞用户操作
+  })
+}
+
 onBeforeUnmount(() => {
   if (duplicateTimer !== null) window.clearTimeout(duplicateTimer)
 })
@@ -131,7 +148,7 @@ onBeforeUnmount(() => {
       </div>
       <div v-else class="list-scroll">
         <div
-          v-for="action in appStore.keyboardConfigs"
+          v-for="(action, index) in appStore.keyboardConfigs"
           :key="action.id"
           class="list-row"
           :class="{ disabled: !action.enabled }"
@@ -145,7 +162,8 @@ onBeforeUnmount(() => {
               @change="toggleSelected(action.id)"
             />
           </label>
-          <span class="key-info">{{ action.keyLabel }}</span>
+          <span class="key-badge">{{ action.keyLabel }}</span>
+          <span class="interval-label">间隔</span>
           <input
             type="text"
             inputmode="numeric"
@@ -156,6 +174,42 @@ onBeforeUnmount(() => {
             @keydown.enter="onIntervalCommit(action, $event)"
           />
           <span class="unit">ms</span>
+          <button
+            type="button"
+            class="move-btn"
+            aria-label="上移"
+            :disabled="index === 0"
+            @click="moveUp(index)"
+          >
+            <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true">
+              <path
+                d="M3 7 L6 4 L9 7"
+                stroke="currentColor"
+                stroke-width="1.5"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                fill="none"
+              />
+            </svg>
+          </button>
+          <button
+            type="button"
+            class="move-btn"
+            aria-label="下移"
+            :disabled="index === appStore.keyboardConfigs.length - 1"
+            @click="moveDown(index)"
+          >
+            <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true">
+              <path
+                d="M3 5 L6 8 L9 5"
+                stroke="currentColor"
+                stroke-width="1.5"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                fill="none"
+              />
+            </svg>
+          </button>
           <button
             type="button"
             class="delete-btn"
@@ -259,11 +313,11 @@ onBeforeUnmount(() => {
 .list-row {
   display: flex;
   align-items: center;
-  gap: 10px;
-  height: 36px;
-  min-height: 36px;
+  gap: 12px;
+  height: 40px;
+  min-height: 40px;
   flex-shrink: 0;
-  padding: 0 12px;
+  padding: 0 14px;
   background: var(--bg-secondary);
   border: 1px solid var(--border-subtle);
   border-radius: 7px;
@@ -287,11 +341,25 @@ onBeforeUnmount(() => {
   accent-color: var(--accent);
 }
 
-.key-info {
-  flex: 1;
+.key-badge {
+  min-width: 80px;
+  height: 26px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 12px;
+  border-radius: 5px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
   font-size: 13px;
+  font-weight: 600;
   color: var(--text-primary);
-  font-weight: 500;
+}
+
+.interval-label {
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin-left: auto;
 }
 
 .interval-input {
@@ -317,6 +385,7 @@ onBeforeUnmount(() => {
   color: var(--text-disabled);
 }
 
+.move-btn,
 .delete-btn {
   display: flex;
   align-items: center;
@@ -328,6 +397,16 @@ onBeforeUnmount(() => {
   transition:
     background var(--transition-fast) var(--ease-default),
     color var(--transition-fast) var(--ease-default);
+}
+
+.move-btn:hover:not(:disabled) {
+  background: var(--bg-elevated);
+  color: var(--text-primary);
+}
+
+.move-btn:disabled {
+  opacity: 0.3;
+  cursor: not-allowed;
 }
 
 .delete-btn:hover {

@@ -20,15 +20,6 @@ pub const MIN_INTERVAL_MS: u64 = 5;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "snake_case")]
-pub enum KeyActionType {
-    #[default]
-    Press,
-    Hold,
-    Combo,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
-#[serde(rename_all = "snake_case")]
 pub enum MouseActionType {
     #[default]
     ClickLeft,
@@ -51,14 +42,8 @@ pub struct CapturedKey {
 pub struct KeyboardConfig {
     pub id: String,
     pub enabled: bool,
-    #[serde(default)]
-    pub action_type: KeyActionType,
     pub key_label: String,
     pub scan_code: u16,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub hold_duration_ms: Option<u64>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub modifiers: Vec<u16>,
     pub interval_ms: u64,
 }
 
@@ -120,11 +105,8 @@ pub fn default_config() -> AppConfig {
         keyboard_configs: vec![KeyboardConfig {
             id: "default-keyboard-1".to_string(),
             enabled: true,
-            action_type: KeyActionType::Press,
             key_label: "F".to_string(),
             scan_code: 33,
-            hold_duration_ms: None,
-            modifiers: Vec::new(),
             interval_ms: DEFAULT_INTERVAL_MS,
         }],
         mouse_configs: vec![MouseConfig {
