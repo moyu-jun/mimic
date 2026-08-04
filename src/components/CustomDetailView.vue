@@ -15,7 +15,7 @@ import { invoke } from '@tauri-apps/api/core'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import { appStore } from '../stores/appStore'
 import KeyCaptureInput from './KeyCaptureInput.vue'
-import type { CapturedKey, CustomAction, CustomSequence } from '../types/config'
+import type { CapturedKey, CustomAction, CustomSequence, MouseActionType } from '../types/config'
 import { persistConfig } from '../lib/configUtil'
 
 const DEFAULT_INTERVAL_MS = 20
@@ -29,6 +29,15 @@ const capturedKey = ref<CapturedKey | null>(null)
 let unlistenPicked: UnlistenFn | null = null
 
 onMounted(async () => {
+  // 取消勾选框后动作默认全启用：将历史 enabled=false 的动作归一为 true 并持久化。
+  if (sequence.value) {
+    const changed = sequence.value.actions.some(a => !a.enabled)
+    if (changed) {
+      sequence.value.actions.forEach(a => { a.enabled = true })
+      persist()
+    }
+  }
+
   // 监听坐标拾取完成 → 回填到本序列内对应鼠标动作行
   unlistenPicked = await listen<{ rowId: string; x: number; y: number }>(
     'mouse_position_picked',
@@ -120,12 +129,14 @@ function addMouseAction(): void {
   persist()
 }
 
-// ---- 行操作 ----
-function toggleEnabled(action: CustomAction): void {
-  action.enabled = !action.enabled
+function onMouseButtonChange(action: CustomAction, e: Event): void {
+  if (action.kind !== 'mouse') return
+  const value = (e.target as HTMLSelectElement).value as MouseActionType
+  action.actionType = value
   persist()
 }
 
+// ---- 行操作 ----
 function deleteAction(id: string): void {
   if (!sequence.value) return
   const idx = sequence.value.actions.findIndex(a => a.id === id)
@@ -215,49 +226,56 @@ function onIntervalCommit(action: CustomAction, e: Event): void {
           v-for="(action, index) in sequence.actions"
           :key="action.id"
           class="list-row"
-          :class="{ disabled: !action.enabled }"
         >
-          <label class="checkbox-wrapper">
-            <input
-              type="checkbox"
-              class="checkbox"
-              :checked="action.enabled"
-              aria-label="启用此动作"
-              @change="toggleEnabled(action)"
-            />
-          </label>
-
           <span class="kind-tag" :class="action.kind">
             {{ action.kind === 'keyboard' ? '键' : '鼠' }}
           </span>
 
-          <!-- 键盘行：显示键位 -->
-          <span v-if="action.kind === 'keyboard'" class="row-info">
+          <!-- 键盘行：显示键位徽标 -->
+          <span v-if="action.kind === 'keyboard'" class="key-badge">
             {{ action.keyLabel }}
           </span>
-          <!-- 鼠标行：显示坐标 + 拾取 -->
-          <span v-else class="row-info coord">
-            {{ action.x !== null ? action.x : '—' }}, {{ action.y !== null ? action.y : '—' }}
-          </span>
-          <button
-            v-if="action.kind === 'mouse'"
-            type="button"
-            class="pick-btn"
-            @click="startPickPosition(action.id)"
-          >
-            坐标拾取
-          </button>
+          <!-- 鼠标行：按钮类型下拉 + 坐标区 + 拾取按钮 -->
+          <div v-else class="mouse-row-content">
+            <select
+              class="mouse-button-select"
+              :value="action.actionType"
+              @change="onMouseButtonChange(action, $event)"
+            >
+              <option value="click_left">左键</option>
+              <option value="click_middle">中键</option>
+              <option value="click_right">右键</option>
+            </select>
+            <span class="coord-text">
+              <template v-if="action.x !== null && action.y !== null">
+                {{ action.x }} - {{ action.y }}
+              </template>
+              <template v-else>
+                X - Y
+              </template>
+            </span>
+            <button
+              type="button"
+              class="pick-btn"
+              @click="startPickPosition(action.id)"
+            >
+              拾取
+            </button>
+          </div>
 
-          <input
-            type="text"
-            inputmode="numeric"
-            class="interval-input"
-            :value="action.intervalMs"
-            @input="onIntervalInput(action, $event)"
-            @blur="onIntervalCommit(action, $event)"
-            @keydown.enter="onIntervalCommit(action, $event)"
-          />
-          <span class="unit">ms</span>
+          <div class="interval-group">
+            <span class="interval-label">间隔</span>
+            <input
+              type="text"
+              inputmode="numeric"
+              class="interval-input"
+              :value="action.intervalMs"
+              @input="onIntervalInput(action, $event)"
+              @blur="onIntervalCommit(action, $event)"
+              @keydown.enter="onIntervalCommit(action, $event)"
+            />
+            <span class="unit">ms</span>
+          </div>
 
           <button
             type="button"
@@ -418,7 +436,7 @@ function onIntervalCommit(action: CustomAction, e: Event): void {
 .list-scroll {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 8px;
   overflow-y: auto;
   scrollbar-gutter: stable;
 }
@@ -427,31 +445,14 @@ function onIntervalCommit(action: CustomAction, e: Event): void {
   display: flex;
   align-items: center;
   gap: 10px;
-  height: 36px;
-  min-height: 36px;
+  height: 40px;
+  min-height: 40px;
   flex-shrink: 0;
-  padding: 0 12px;
+  padding: 0 14px;
   background: var(--bg-secondary);
   border: 1px solid var(--border-subtle);
-  border-radius: 7px;
+  border-radius: 8px;
   transition: opacity var(--transition-fast) var(--ease-default);
-}
-
-.list-row.disabled {
-  opacity: 0.5;
-}
-
-.checkbox-wrapper {
-  display: flex;
-  align-items: center;
-  cursor: pointer;
-}
-
-.checkbox {
-  width: 16px;
-  height: 16px;
-  cursor: pointer;
-  accent-color: var(--accent);
 }
 
 .kind-tag {
@@ -476,42 +477,128 @@ function onIntervalCommit(action: CustomAction, e: Event): void {
   color: var(--warning);
 }
 
-.row-info {
+.key-badge {
   flex: 1;
-  font-size: 13px;
+  min-width: 0;
+  height: 30px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 16px;
+  border-radius: 6px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  font-size: 15px;
+  font-weight: 600;
   color: var(--text-primary);
-  font-weight: 500;
+  letter-spacing: 0.5px;
 }
 
-.row-info.coord {
+.coord-area {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.mouse-row-content {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.mouse-button-select {
+  width: 70px;
+  height: 28px;
+  padding: 0 6px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  border-radius: 5px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-primary);
+  cursor: pointer;
+  transition: border-color var(--transition-fast) var(--ease-default);
+  flex-shrink: 0;
+}
+
+.mouse-button-select:hover {
+  border-color: var(--accent);
+}
+
+.mouse-button-select:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.coord-text {
+  flex: 1;
+  min-width: 0;
   font-family: 'Consolas', 'Courier New', monospace;
   font-size: 12px;
+  color: var(--text-primary);
+  font-weight: 500;
+  text-align: center;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .pick-btn {
-  height: 24px;
+  width: 70px;
+  height: 28px;
   padding: 0 10px;
   border-radius: 5px;
   background: var(--bg-elevated);
-  border: 1px solid var(--border-subtle);
-  font-size: 11px;
-  color: var(--text-secondary);
-  transition: background var(--transition-fast) var(--ease-default);
+  border: 1px solid var(--border-color);
+  color: var(--text-primary);
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+  flex-shrink: 0;
+  transition:
+    background var(--transition-fast) var(--ease-default),
+    border-color var(--transition-fast) var(--ease-default);
 }
 
 .pick-btn:hover {
+  background: var(--bg-secondary);
+  border-color: var(--accent);
+}
+
+.pick-btn:active {
   background: var(--bg-primary);
-  color: var(--text-primary);
+}
+
+.interval-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+  padding: 4px 10px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  border-radius: 14px;
+  flex-shrink: 0;
+}
+
+.interval-label {
+  font-size: 11px;
+  color: var(--text-secondary);
 }
 
 .interval-input {
   width: 60px;
   height: 24px;
-  padding: 0 8px;
-  background: var(--bg-elevated);
+  padding: 0 6px;
+  background: var(--bg-secondary);
   border: 1px solid var(--border-subtle);
-  border-radius: 5px;
+  border-radius: 4px;
   font-size: 12px;
+  font-weight: 500;
   color: var(--text-primary);
   text-align: center;
   transition: border-color var(--transition-fast) var(--ease-default);
@@ -525,6 +612,7 @@ function onIntervalCommit(action: CustomAction, e: Event): void {
 .unit {
   font-size: 11px;
   color: var(--text-disabled);
+  font-weight: 500;
 }
 
 .move-btn,
@@ -532,10 +620,11 @@ function onIntervalCommit(action: CustomAction, e: Event): void {
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 24px;
-  height: 24px;
+  width: 26px;
+  height: 26px;
   border-radius: 5px;
   color: var(--text-secondary);
+  flex-shrink: 0;
   transition:
     background var(--transition-fast) var(--ease-default),
     color var(--transition-fast) var(--ease-default);

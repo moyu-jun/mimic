@@ -1,19 +1,28 @@
 <script setup lang="ts">
 /**
  * 鼠标模拟页 — 需求 3.3.3 / DESIGN 15.6
- * 表格四列：X坐标 / Y坐标 / 时间间隔 / 操作（坐标拾取 + 删除）。
+ * 表格六列：启用 / 类型 / X坐标 / Y坐标 / 时间间隔 / 操作（坐标拾取 + 删除）。
  * 表头固定（sticky），数据行滚动。
  * 阶段 12：移除 onMounted/onBeforeUnmount 中的状态切换，由 set_current_page 统一管理。
  * 阶段 14：坐标拾取接真实命令 start_pick_mouse_position，监听 mouse_position_picked 回填并持久化。
+ * 维护迭代：数据模型新增 actionType（左/右/中键单击）与 enabled 开关，列表页按新模型组织；
+ *           界面按 800×600 窗口重新布局。
  */
 import { onMounted, onBeforeUnmount } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import { appStore } from '../stores/appStore'
-import type { MouseConfig } from '../types/config'
+import type { MouseActionType, MouseConfig } from '../types/config'
 import { persistConfig } from '../lib/configUtil'
 
 const DEFAULT_INTERVAL_MS = 20
+
+// 列表页支持的动作类型（三种单击）。
+const ACTION_TYPE_OPTIONS: { value: MouseActionType; label: string }[] = [
+  { value: 'click_left', label: '左键单击' },
+  { value: 'click_right', label: '右键单击' },
+  { value: 'click_middle', label: '中键单击' },
+]
 
 let unlistenPicked: UnlistenFn | null = null
 
@@ -65,6 +74,20 @@ function deleteAction(id: string): void {
   }
 }
 
+function toggleEnabled(action: MouseConfig): void {
+  action.enabled = !action.enabled
+  persistConfig().catch(() => {
+    // 错误已在 configUtil 中记录，不阻塞用户操作
+  })
+}
+
+function onActionTypeChange(action: MouseConfig, e: Event): void {
+  action.actionType = (e.target as HTMLSelectElement).value as MouseActionType
+  persistConfig().catch(() => {
+    // 错误已在 configUtil 中记录，不阻塞用户操作
+  })
+}
+
 function onIntervalInput(action: MouseConfig, e: Event): void {
   const target = e.target as HTMLInputElement
   // 仅剥离非数字字符；允许中间态为空（用户清空后准备重新输入）
@@ -102,6 +125,8 @@ function startPickPosition(id: string): void {
   <section class="mouse-page">
     <div class="table-scroll">
       <div class="table-header">
+        <div class="th">启用</div>
+        <div class="th">操作类型</div>
         <div class="th">X 坐标</div>
         <div class="th">Y 坐标</div>
         <div class="th">时间间隔</div>
@@ -116,7 +141,33 @@ function startPickPosition(id: string): void {
         v-else
         :key="action.id"
         class="table-row"
+        :class="{ disabled: !action.enabled }"
       >
+        <div class="td enabled-cell">
+          <input
+            type="checkbox"
+            class="checkbox"
+            :checked="action.enabled"
+            aria-label="启用此动作"
+            @change="toggleEnabled(action)"
+          />
+        </div>
+        <div class="td type-cell">
+          <select
+            class="type-select"
+            :value="action.actionType"
+            aria-label="动作类型"
+            @change="onActionTypeChange(action, $event)"
+          >
+            <option
+              v-for="opt in ACTION_TYPE_OPTIONS"
+              :key="opt.value"
+              :value="opt.value"
+            >
+              {{ opt.label }}
+            </option>
+          </select>
+        </div>
         <div class="td coord-cell">
           {{ action.x !== null ? action.x : '—' }}
         </div>
@@ -173,8 +224,8 @@ function startPickPosition(id: string): void {
   display: flex;
   flex-direction: column;
   height: 100%;
-  padding: 14px 16px;
-  gap: 12px;
+  padding: 16px 18px;
+  gap: 14px;
   overflow: hidden;
 }
 
@@ -191,20 +242,20 @@ function startPickPosition(id: string): void {
 .table-header,
 .table-row {
   display: grid;
-  grid-template-columns: 56px 56px 100px 1fr;
-  gap: 8px;
+  grid-template-columns: 48px 104px 1fr 1fr 128px 108px;
+  gap: 10px;
   align-items: center;
-  padding: 0 12px;
+  padding: 0 16px;
 }
 
 .table-header {
   position: sticky;
   top: 0;
   z-index: 1;
-  height: 30px;
+  height: 36px;
   background: var(--bg-elevated);
   border-bottom: 1px solid var(--border-subtle);
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 600;
   color: var(--text-secondary);
 }
@@ -219,19 +270,60 @@ function startPickPosition(id: string): void {
 }
 
 .table-row {
-  height: 36px;
-  min-height: 36px;
+  height: 44px;
+  min-height: 44px;
   border-bottom: 1px solid var(--border-subtle);
   background: var(--bg-secondary);
+  transition: opacity var(--transition-fast) var(--ease-default);
 }
 
 .table-row:last-child {
   border-bottom: none;
 }
 
+.table-row.disabled {
+  opacity: 0.5;
+}
+
 .td {
+  font-size: 13px;
+  color: var(--text-primary);
+}
+
+.enabled-cell {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.checkbox {
+  width: 18px;
+  height: 18px;
+  cursor: pointer;
+  accent-color: var(--accent);
+}
+
+.type-cell {
+  display: flex;
+  align-items: center;
+}
+
+.type-select {
+  width: 100%;
+  height: 28px;
+  padding: 0 8px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  border-radius: 5px;
   font-size: 12px;
   color: var(--text-primary);
+  cursor: pointer;
+  transition: border-color var(--transition-fast) var(--ease-default);
+}
+
+.type-select:focus {
+  outline: none;
+  border-color: var(--accent);
 }
 
 .coord-cell {
@@ -249,7 +341,7 @@ function startPickPosition(id: string): void {
 .actions-cell {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
 }
 
 .empty-hint {
@@ -257,18 +349,18 @@ function startPickPosition(id: string): void {
   align-items: center;
   justify-content: center;
   height: 100%;
-  font-size: 12px;
+  font-size: 13px;
   color: var(--text-disabled);
 }
 
 .interval-input {
-  width: 56px;
-  height: 24px;
+  width: 60px;
+  height: 26px;
   padding: 0 8px;
   background: var(--bg-elevated);
   border: 1px solid var(--border-subtle);
   border-radius: 5px;
-  font-size: 12px;
+  font-size: 13px;
   color: var(--text-primary);
   text-align: center;
   transition: border-color var(--transition-fast) var(--ease-default);
@@ -280,18 +372,18 @@ function startPickPosition(id: string): void {
 }
 
 .unit {
-  font-size: 11px;
+  font-size: 12px;
   color: var(--text-disabled);
 }
 
 .pick-btn {
-  height: 24px;
-  padding: 0 10px;
+  height: 26px;
+  padding: 0 12px;
   border-radius: 5px;
   background: var(--bg-elevated);
   border: 1px solid var(--border-color);
   color: var(--text-primary);
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 500;
   white-space: nowrap;
   transition:
@@ -312,8 +404,8 @@ function startPickPosition(id: string): void {
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 24px;
-  height: 24px;
+  width: 26px;
+  height: 26px;
   border-radius: 5px;
   color: var(--text-secondary);
   flex-shrink: 0;
@@ -338,9 +430,9 @@ function startPickPosition(id: string): void {
 }
 
 .add-btn {
-  height: 32px;
-  min-width: 160px;
-  padding: 0 36px;
+  height: 34px;
+  min-width: 180px;
+  padding: 0 40px;
   border-radius: 6px;
   background: var(--accent);
   color: var(--color-paper-white);
