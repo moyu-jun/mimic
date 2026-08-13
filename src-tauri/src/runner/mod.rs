@@ -90,9 +90,9 @@ impl SimulationRunner {
         });
     }
 
-    /// 停止当前模拟运行：置 stop_flag → 短等待 → 回 Idle + play_stop + emit。
+    /// 停止当前模拟运行：置 stop_flag → 短等待 → 回 Ready* + play_stop + emit。
     pub fn stop(app: &AppHandle, state: &SharedState) {
-        info!("[runner] stop triggered: Running* -> Idle");
+        info!("[runner] stop triggered: Running* -> Ready* or Idle");
 
         // 停止提示音 — 本函数仅在 Running* 状态下调用，即停止真正生效。
         crate::sound::play_stop();
@@ -112,7 +112,11 @@ impl SimulationRunner {
         // 等待一小段时间让模拟循环退出
         std::thread::sleep(std::time::Duration::from_millis(50));
 
-        // 更新状态 — 自定义序列停止后回 ReadyCustom（仍在详情页，可再启动）；其余回 Idle。
+        // 更新状态 — 按当前页面与激活序列决定停止后的状态：
+        //   - 自定义序列停止 → ReadyCustom（仍在详情页，可再启动）
+        //   - keyboard 页停止 → ReadyKeyboard（可再启动）
+        //   - mouse 页停止 → ReadyMouse（可再启动）
+        //   - 其它页面 → Idle
         let new_status = {
             let mut app_state = match state.lock() {
                 Ok(s) => s,
@@ -124,7 +128,11 @@ impl SimulationRunner {
             let status = if app_state.active_custom_sequence_id.is_some() {
                 RuntimeStatus::ReadyCustom
             } else {
-                RuntimeStatus::Idle
+                match app_state.current_page.as_str() {
+                    "keyboard" => RuntimeStatus::ReadyKeyboard,
+                    "mouse" => RuntimeStatus::ReadyMouse,
+                    _ => RuntimeStatus::Idle,
+                }
             };
             app_state.runtime_status = status.clone();
             status
