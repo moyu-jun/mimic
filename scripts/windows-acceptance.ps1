@@ -1,8 +1,7 @@
 ﻿[CmdletBinding()]
 param(
     [string]$ReleaseRoot,
-    [string]$OutputPath,
-    [switch]$RequireSignature
+    [string]$OutputPath
 )
 
 $ErrorActionPreference = "Stop"
@@ -18,11 +17,7 @@ if ([string]::IsNullOrWhiteSpace($OutputPath)) {
 $output = [IO.Path]::GetFullPath($OutputPath)
 New-Item -ItemType Directory -Force -Path ([IO.Path]::GetDirectoryName($output)) | Out-Null
 
-$verifyArguments = @{ ReleaseRoot = $release }
-if ($RequireSignature) {
-    $verifyArguments.RequireSignature = $true
-}
-& (Join-Path $PSScriptRoot "verify-release.ps1") @verifyArguments
+& (Join-Path $PSScriptRoot "verify-release.ps1") -ReleaseRoot $release
 
 $os = Get-CimInstance Win32_OperatingSystem
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -35,9 +30,8 @@ $resources = @(
     [pscustomobject]@{ Name = "installer"; Path = Join-Path $release "driver/install-interception.exe" }
 )
 $resourceRows = foreach ($resource in $resources) {
-    $signature = Get-AuthenticodeSignature -LiteralPath $resource.Path
     $hash = (Get-FileHash -LiteralPath $resource.Path -Algorithm SHA256).Hash
-    "| $($resource.Name) | $hash | $($signature.Status) |"
+    "| $($resource.Name) | $hash |"
 }
 
 function Read-UpperFilters {
@@ -69,8 +63,8 @@ $lines = @(
     "- 键盘 UpperFilters：$keyboardFilters",
     "- 鼠标 UpperFilters：$mouseFilters",
     "",
-    "| 资源 | SHA-256 | Authenticode |",
-    "| --- | --- | --- |"
+    "| 资源 | SHA-256 |",
+    "| --- | --- |"
 )
 $lines += $resourceRows
 $lines += @(
@@ -91,7 +85,6 @@ $lines += @(
     "- [ ] 系统重启只在用户确认后执行；测试环境已做好数据保存。",
     "- [ ] 篡改 helper 或 installer 后操作被拒绝，且不会请求/执行任意路径。",
     "- [ ] 整体移动 portable 目录后，配置、日志、音频和临时目录从新位置派生。",
-    "- [ ] 正式候选包的 mimic.exe、helper、installer Authenticode 均为 Valid。",
     "",
     "人工项涉及真实输入、UAC、驱动、麦克风和重启，不能由本只读脚本代替。"
 )

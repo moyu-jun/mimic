@@ -1,6 +1,6 @@
 # Mimic Rust 后端架构重构计划与实施方案
 
-> 状态：核心架构重构已实施，发布安全验收待完成
+> 状态：核心架构重构及自动发布资源校验已实施，Windows 真机验收待完成
 > 版本：v1.2
 > 日期：2026-08-26
 > 范围：`src-tauri` Rust 后端、Tauri 命令边界及相关构建/安全配置
@@ -526,13 +526,13 @@ RuntimeDomainEvent -> FrontendEventDto -> app.emit(...)
               |
               | user initiated UAC launch + fixed versioned request
               v
-    small signed elevated helper
+    small integrity-checked elevated helper
               |
               +--> install driver
               +--> uninstall driver
               +--> reboot system
 
-实施状态（2026-08-26）：普通主进程不整体提权；独立 `mimic-elevated-helper.exe` 已从主程序拆出，不链接 Tauri/WebView。v1 固定协议、操作白名单、调用进程映像校验、128-bit CSPRNG nonce、一次性请求消费、关键路径重解析点拒绝，以及应用 → helper → 安装器的编译期 SHA-256 闭环均已实现。发布脚本支持在固化哈希前签名 helper，并在最后签名主程序；由于当前未提供正式证书，Authenticode 仍属于外部发布门禁。
+实施状态（2026-08-26）：普通主进程不整体提权；独立 `mimic-elevated-helper.exe` 已从主程序拆出，不链接 Tauri/WebView。v1 固定协议、操作白名单、调用进程映像校验、128-bit CSPRNG nonce、一次性请求消费、关键路径重解析点拒绝，以及应用 → helper → 安装器的编译期 SHA-256 闭环均已实现。根据当前个人、朋友使用及开源项目定位，发布流程只保留哈希完整性链，不引入商业代码签名和证书管理。
 
 要求：
 
@@ -540,9 +540,9 @@ RuntimeDomainEvent -> FrontendEventDto -> app.emit(...)
 - 只有用户点击并确认具体高权限操作后才启动 helper；启动应用、检测驱动和普通模拟不得触发 UAC。
 - helper 不加载网页、不解析通用脚本，不接受任意命令、任意可执行路径或任意附加参数。
 - 请求协议使用固定 schema、版本、操作白名单、长度限制、nonce 和调用方身份校验；每个请求只表达一个预定义操作。
-- 主程序在启动 helper 前验证构建时固化的 SHA-256；helper 在执行驱动安装器前验证编译期固化的 SHA-256。正式生产发布还必须对主程序、helper 和安装器做 Authenticode 签名及发布方验证。
+- 主程序在启动 helper 前验证构建时固化的 SHA-256；helper 在执行驱动安装器前验证编译期固化的 SHA-256。哈希校验失败时必须失败关闭。
 - helper 使用绝对路径访问固定 driver 目录，返回结构化结果后立即退出，不作为常驻高权限服务。
-- 用户拒绝 UAC、签名/哈希失败或协议非法时返回可恢复错误，不改变原驱动状态，也不影响普通功能。
+- 用户拒绝 UAC、哈希失败或协议非法时返回可恢复错误，不改变原驱动状态，也不影响普通功能。
 
 ### 10.2 便携数据与可执行资源分离
 
@@ -567,7 +567,7 @@ RuntimeDomainEvent -> FrontendEventDto -> app.emit(...)
 - 路径由单一 PortablePaths 组件从规范化后的可执行文件目录派生，不使用当前工作目录，不写入 AppData。
 - 所有运行时可写内容只能进入 data：配置写入 data/mimic.ini，日志进入 data/logs，用户 WAV 进入 data/audio，临时文件进入 data/temp。
 - Mimic.exe、DLL、helper 和安装器不得写入或从 data 加载；helper 只访问固定 driver 目录中的安装器。
-- portable 目录通常可被当前用户整体修改，逻辑分目录不等于 ACL 安全边界；因此每次提权执行都必须重新做签名/哈希校验。
+- portable 目录通常可被当前用户整体修改，逻辑分目录不等于 ACL 安全边界；因此每次提权执行都必须重新做固化 SHA-256 校验。
 - 配置、日志、音频和临时路径都要规范化并校验父目录，拒绝绝对路径注入、父目录跳转、链接绕过和超长路径异常。
 - 发布包可以整目录移动，移动后下一次启动应以新可执行文件目录重新解析 data 路径。
 
@@ -759,10 +759,10 @@ RuntimeDomainEvent -> FrontendEventDto -> app.emit(...)
 任务：
 
 - 主应用默认非管理员运行。
-- 将驱动安装、卸载和系统重启迁移到最小签名 helper。
+- 将驱动安装、卸载和系统重启迁移到最小完整性校验 helper。
 - 定义版本化 IPC、调用方校验和操作白名单。
 - 实现 PortablePaths，将配置、日志、用户音频和临时文件固定到可执行文件同级 data 子目录，不使用 AppData。
-- 将 helper/安装器与 data 逻辑隔离；每次提权执行前校验 helper 签名以及安装器签名/固化哈希。
+- 将 helper/安装器与 data 逻辑隔离；每次提权执行前校验 helper 和安装器的编译期固化 SHA-256。
 - 使用 Tauri resource/bundle 替代脆弱复制，关键失败使构建失败。
 - 设置 CSP 并收紧 capabilities/opener。
 - 替换裸系统命令路径。
@@ -793,7 +793,7 @@ RuntimeDomainEvent -> FrontendEventDto -> app.emit(...)
 
 - 无双实现、无死 feature flag、无过期 TODO。
 - 新成员可从文档定位每个资源的所有者。
-- 全部门禁通过，发布包完成签名与资源校验。
+- 全部自动门禁通过，发布包完成资源与固化哈希校验。
 
 回滚：使用发布 tag 回滚；数据库/配置格式若升级必须保留向后兼容读取。
 
@@ -850,7 +850,7 @@ RuntimeDomainEvent -> FrontendEventDto -> app.emit(...)
 | 损坏音频导入 | 结构化错误，无 panic |
 | 普通用户运行 | 主程序保持普通权限，仅用户确认的 helper 操作按需 UAC |
 | 拒绝 UAC | 普通功能继续可用，错误可恢复 |
-| 缺少/篡改资源 | helper/安装器签名或哈希失败即拒绝提权执行；普通功能可继续 |
+| 缺少/篡改资源 | helper/安装器固化哈希失败即拒绝提权执行；普通功能可继续 |
 
 ### 13.5 质量门禁
 
@@ -950,7 +950,7 @@ npm run build
 
 - [x] 主应用默认普通权限。
 - [x] 高权限操作位于最小 helper 且协议白名单化。
-- [x] portable data 与可执行资源逻辑隔离，每次提权前验证 helper/安装器签名或固化哈希。
+- [x] portable data 与可执行资源逻辑隔离，每次提权前验证 helper/安装器的固化 SHA-256。
 - [x] 路径、长度、次数、时长和文件大小均有上限。
 - [x] CSP/capabilities/opener 按最小权限配置。
 - [x] unsafe 块已收敛到 Windows FFI/句柄边界，每处均有 `SAFETY` 前提并检查关键返回码。
@@ -961,11 +961,10 @@ npm run build
 - [x] Runtime 生命周期并发测试通过。
 - [x] WAV/config fuzz 或 property tests 通过；固定 seed runner、语料、artifact 和每周 Windows CI 已建立。
 - [ ] Windows 手工矩阵通过。
-- [x] 未签名 release 构建、资源/重解析点/固化哈希校验通过，签名强制门禁能正确拒绝未签名产物。
-- [ ] 正式候选包 Authenticode 签名及证书指纹校验通过。
+- [x] release 构建、资源/重解析点/固化哈希校验通过。
 - [x] 架构、错误码、线程所有权和运维文档已更新。
 
-> 代码与自动化范围内的改造已完成。仍未勾选的两项依赖正式签名证书以及装有 Interception 和真实键鼠/音频设备的专用 Windows 验收机，不能由本地未签名构建或 FakeDriver 结果替代。
+> 代码与自动化范围内的改造已完成。仍未勾选的 Windows 手工矩阵依赖装有 Interception 和真实键鼠/音频设备的专用验收机，不能由本地构建或 FakeDriver 结果替代。商业代码签名已根据当前项目定位明确排除，不再作为未完成门禁。
 
 ## 17. 风险登记表
 
@@ -976,7 +975,7 @@ npm run build
 | release_all 本身部分失败 | 中 | 高 | 逆序尽力释放、继续后续释放、明确错误和人工恢复提示 |
 | 第三方驱动线程契约不清楚 | 中 | 高 | 线程内创建/销毁、最小 unsafe、针对版本验证 |
 | helper IPC 设计过宽 | 中 | 高 | 固定 schema、白名单、调用方校验、安全评审 |
-| portable 目录被当前用户整体篡改 | 中 | 高 | 明示安全降级；helper/安装器每次提权前重新验证签名/固化哈希；协议拒绝任意路径 |
+| portable 目录被当前用户整体篡改 | 中 | 高 | 明示安全降级；helper/安装器每次提权前重新验证固化 SHA-256；协议拒绝任意路径 |
 | 双 Backend 长期共存 | 中 | 中 | Phase 3 强制删除项和完成门禁 |
 | 目录移动造成评审困难 | 高 | 低 | 与逻辑提交分离 |
 | 测试依赖真实 sleep 导致不稳定 | 中 | 中 | reply/barrier/fake clock，禁止猜测式等待 |
@@ -984,7 +983,7 @@ npm run build
 
 ## 18. 里程碑与工作量
 
-以下为单名熟悉 Rust/Windows/Tauri 工程师的粗略估算，不含产品决策等待和第三方签名证书流程：
+以下为单名熟悉 Rust/Windows/Tauri 工程师的粗略估算，不含产品决策等待：
 
 | 里程碑 | 阶段 | 预计工作量 | 交付物 |
 |---|---|---:|---|
@@ -1008,7 +1007,7 @@ npm run build
 | 停止指标 | P95 不超过 100ms，最坏不超过 250ms，成功时已释放输入且旧 run 不再产出 |
 | 删除序列 | 整个序列删除需确认且不可撤销；单行动作删除不加确认 |
 | D1 数据模式 | portable mode，全部可写数据放入可执行文件同级 data 子目录 |
-| D2 提权 | 普通主程序 + 最小签名 helper，用户确认具体操作后才触发 UAC |
+| D2 提权 | 普通主程序 + 最小完整性校验 helper，用户确认具体操作后才触发 UAC |
 | D3 热键冲突 | 独立按键列表始终校验；自定义序列只校验当前准备运行的序列，冲突则定位动作并阻止启动 |
 | D4 运行取消 | 运行蒙版中央提供“取消”，复用安全 Stop 并恢复运行前 Ready 状态 |
 | D5 配置恢复 | 默认值写入代码；每次启动校验，缺失生成默认，非法直接默认覆盖，不备份 |

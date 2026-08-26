@@ -1,8 +1,3 @@
-param(
-    [string]$CertificateThumbprint = $env:MIMIC_SIGNING_CERT_THUMBPRINT,
-    [string]$TimestampUrl = "http://timestamp.digicert.com"
-)
-
 $ErrorActionPreference = "Stop"
 $repositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $tauriRoot = Join-Path $repositoryRoot "src-tauri"
@@ -10,23 +5,6 @@ $generatedHelper = Join-Path $repositoryRoot "extra\driver\mimic-elevated-helper
 $helperBuild = Join-Path $tauriRoot "target\release\mimic-elevated-helper.exe"
 $applicationBuild = Join-Path $tauriRoot "target\release\mimic.exe"
 $packagedHelper = Join-Path $tauriRoot "target\release\driver\mimic-elevated-helper.exe"
-
-function Invoke-CodeSign {
-    param([Parameter(Mandatory = $true)][string]$Path)
-
-    if ([string]::IsNullOrWhiteSpace($CertificateThumbprint)) {
-        return
-    }
-    $signTool = Get-Command "signtool.exe" -ErrorAction Stop
-    & $signTool.Source sign /sha1 $CertificateThumbprint /fd SHA256 /tr $TimestampUrl /td SHA256 $Path
-    if ($LASTEXITCODE -ne 0) {
-        throw "signtool failed for $Path"
-    }
-    $signature = Get-AuthenticodeSignature -LiteralPath $Path
-    if ($signature.Status -ne "Valid") {
-        throw "Authenticode validation failed for ${Path}: $($signature.Status)"
-    }
-}
 
 Push-Location $repositoryRoot
 try {
@@ -46,12 +24,9 @@ try {
 
         cargo build --release -p mimic-elevated-helper
         if ($LASTEXITCODE -ne 0) { throw "helper release build failed" }
-        Invoke-CodeSign -Path $helperBuild
-
         Copy-Item -LiteralPath $helperBuild -Destination $generatedHelper -Force
         cargo build --release -p mimic
         if ($LASTEXITCODE -ne 0) { throw "application release build failed" }
-        Invoke-CodeSign -Path $applicationBuild
     }
     finally {
         Pop-Location
@@ -66,20 +41,10 @@ try {
         throw "packaged helper hash does not match the embedded release helper"
     }
 
-    $verifyArguments = @{
-        ReleaseRoot = Join-Path $tauriRoot "target/release"
-    }
-    if (-not [string]::IsNullOrWhiteSpace($CertificateThumbprint)) {
-        $verifyArguments.RequireSignature = $true
-        $verifyArguments.ExpectedAppThumbprint = $CertificateThumbprint
-    }
-    & (Join-Path $PSScriptRoot "verify-release.ps1") @verifyArguments
+    & (Join-Path $PSScriptRoot "verify-release.ps1") -ReleaseRoot (Join-Path $tauriRoot "target/release")
 
     Write-Host "Release verified: $applicationBuild"
     Write-Host "Helper SHA-256: $sourceHash"
-    if ([string]::IsNullOrWhiteSpace($CertificateThumbprint)) {
-        Write-Warning "No signing certificate supplied; binaries are hash-pinned but unsigned."
-    }
 }
 finally {
     Remove-Item -LiteralPath $generatedHelper -Force -ErrorAction SilentlyContinue

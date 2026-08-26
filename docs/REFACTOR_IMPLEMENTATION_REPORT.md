@@ -1,7 +1,7 @@
 # Mimic Rust 重构实施报告
 
 > 更新日期：2026-08-26
-> 当前状态：代码级核心重构和独立最小 helper 已完成；Windows 真机与 Authenticode 签名门禁未完成
+> 当前状态：代码级核心重构、独立最小 helper 和自动发布资源门禁已完成；Windows 真机验收未完成
 > 对应方案：[RUST_ARCHITECTURE_REFACTOR_PLAN.md](./RUST_ARCHITECTURE_REFACTOR_PLAN.md)
 
 ## 1. 实施结论
@@ -81,7 +81,7 @@
 - 一次性请求使用 `data/temp` 文件的 create-new + 原子 claim/consume。
 - 主程序在 UAC 前验证 build-time 固化的 helper SHA-256；helper 执行动作前验证安装器固化 SHA-256。
 - helper 拒绝关键资源重解析点；系统重启使用 System32 绝对路径和固定参数，不经过 shell。
-- 发布脚本按“helper 构建/可选签名 → 固化最终哈希 → 主程序构建/可选签名 → 打包副本复核”执行。
+- 发布脚本按“helper 构建 → 固化最终哈希 → 主程序构建 → 打包副本复核”执行。
 - `PortablePaths` 规范化当前可执行文件路径；数据目录和固定文件拒绝符号链接/Windows 重解析点。
 - CSP、capabilities 和构建资源检查已收紧。
 - Windows 令牌、注册表、进程、路径、光标、屏幕指标和 WinMM FFI 均有最小作用域 `SAFETY` 契约；关键句柄关闭结果显式检查。
@@ -101,9 +101,9 @@
 
 ## 3. 与原方案的实现差异
 
-独立、最小化的 `mimic-elevated-helper.exe` 已按方案落地，主程序不再包含 elevated 分流或直接执行安装器的路径。当前实现以编译期固化 SHA-256 完成应用 → helper → 安装器的完整性闭环，并在提供证书指纹时由发布脚本调用 `signtool` 后再固化最终文件哈希。
+独立、最小化的 `mimic-elevated-helper.exe` 已按方案落地，主程序不再包含 elevated 分流或直接执行安装器的路径。当前实现以编译期固化 SHA-256 完成应用 → helper → 安装器的完整性闭环。
 
-当前工作区没有正式 Authenticode 证书、发布主体及证书保管/轮换流程，因此本地发布产物仍是“哈希固定但未签名”。这不阻塞代码结构完成，但生产签名验收仍保持未完成状态。
+根据最新产品定位，Mimic 仅用于个人、朋友及开源场景，不用于商业销售或正式渠道分发。发布脚本已删除商业代码签名、证书指纹、时间戳及签名强制门禁；这属于明确的范围调整，不再记作未完成项。若未来改变分发定位，应单独进行威胁建模和发布方案评审。
 
 ## 4. 自动化门禁
 
@@ -117,8 +117,7 @@
 | `scripts/run-fuzz.ps1 -Iterations 500000` | 通过；固定 seed，500,000 cases，零 panic，36,740 cases/s（13.61 秒） |
 | `scripts/measure-stop-latency.ps1 -Runs 3` | 通过；三次各 200 样本，P95 142～185µs，最大 206～508µs |
 | `scripts/verify-release.ps1` | 通过；普通文件、重解析点、helper 副本和安装器固化哈希均通过 |
-| `verify-release.ps1 -RequireSignature` | 正确拒绝当前未签名产物，exit 1 |
-| `scripts/windows-acceptance.ps1` | 只读预检通过并生成验收记录；当前无 Interception、产物未签名 |
+| `scripts/windows-acceptance.ps1` | 只读预检通过并生成验收记录；当前无 Interception |
 | `scripts/build-release.ps1` | 通过；主程序 9,536,512 bytes，helper 265,216 bytes；helper 构建/打包 SHA-256 均为 `781B9AD7…48E24D59` |
 | `git diff --check` | 通过；仅 CRLF 转换提示 |
 | Release helper 失败关闭 | 空参数和未知操作均退出 64，未进入 UAC 或维护动作；helper/打包副本 SHA-256 一致 |
@@ -126,11 +125,9 @@
 
 ## 5. 剩余发布门禁
 
-1. **Authenticode 发布链**：签名应用、helper 和安装器，定义证书保管、轮换、吊销和 CI 签名流程。
-2. **Windows 真机矩阵**：验证真实键鼠、Interception、物理驱动停止释放、同键启停、透传、UAC 取消/失败、安装/卸载/重启、麦克风占用/拒绝、音频设备缺失和用户播放延迟验收。
+1. **Windows 真机矩阵**：验证真实键鼠、Interception、物理驱动停止释放、同键启停、透传、UAC 取消/失败、安装/卸载/重启、麦克风占用/拒绝、音频设备缺失和用户播放延迟验收。
 
 ## 6. 下一步顺序
 
-1. 在有证书的发布环境签名应用、helper 和安装器并验证发布方。
-2. 执行 Windows 真机与性能矩阵，记录设备、系统版本、驱动版本和结果。
-3. 将通过的签名、真机和性能证据回填本报告后，才能关闭 Phase 6～7。
+1. 执行 Windows 真机与性能矩阵，记录设备、系统版本、驱动版本和结果。
+2. 将通过的真机和性能证据回填本报告后，关闭剩余手工验收项。

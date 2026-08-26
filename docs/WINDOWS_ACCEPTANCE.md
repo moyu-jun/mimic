@@ -22,10 +22,9 @@ Stop 控制路径使用 FakeDriver 进行 200 样本分布测量，测试包含�
 
 ~~~powershell
 .\scripts\verify-release.ps1
-.\scripts\verify-release.ps1 -RequireSignature -ExpectedAppThumbprint '<thumbprint>'
 ~~~
 
-校验项包括非空普通文件/重解析点拒绝、helper 构建副本与打包副本 SHA-256 一致、安装器 SHA-256 固化值，以及可选的 Authenticode 强制校验。启用签名强制时，应用与两个 helper 副本还必须匹配指定证书指纹。
+校验项包括非空普通文件、重解析点拒绝、helper 构建副本与打包副本 SHA-256 一致，以及安装器 SHA-256 与代码固化值一致。当前个人、朋友使用和开源项目定位不包含商业代码签名验收。
 
 ## 2. 当前只读预检结果
 
@@ -35,9 +34,9 @@ Stop 控制路径使用 FakeDriver 进行 200 样本分布测量，测试包含�
 .\scripts\windows-acceptance.ps1
 ~~~
 
-资源、重解析点和哈希门禁通过。当前键盘/鼠标 UpperFilters 未检测到 Interception；应用、helper 和安装器均为 `NotSigned`。因此自动预检完成，但驱动真机和正式签名验收不能在当前环境关闭。
+资源、重解析点和哈希门禁通过。当前键盘/鼠标 UpperFilters 未检测到 Interception，因此自动预检完成，但驱动与真实设备行为仍必须在装有 Interception 的 Windows 真机验收。
 
-脚本在 `artifacts/` 生成带系统信息、哈希、签名状态和人工复选框的验收记录；该目录不提交 Git。
+脚本在 `artifacts/` 生成带系统信息、资源哈希和人工复选框的验收记录；该目录不提交 Git。
 
 ## 3. 真机矩阵
 
@@ -50,7 +49,6 @@ Stop 控制路径使用 FakeDriver 进行 200 样本分布测量，测试包含�
 - 麦克风正常、占用、权限拒绝；
 - 音频设备缺失、后台预热和用户首播延迟验收；
 - helper/installer 篡改拒绝；
-- portable 目录移动；
-- 正式签名候选包验证。
+- portable 目录移动。
 
-不得把自动预检、FakeDriver 延迟或未签名本地构建记录为上述真机项已通过。
+不得把自动预检或 FakeDriver 延迟记录为上述真机项已通过。

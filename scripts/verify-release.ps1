@@ -1,8 +1,6 @@
 [CmdletBinding()]
 param(
-    [string]$ReleaseRoot,
-    [switch]$RequireSignature,
-    [string]$ExpectedAppThumbprint = $env:MIMIC_SIGNING_CERT_THUMBPRINT
+    [string]$ReleaseRoot
 )
 
 $ErrorActionPreference = "Stop"
@@ -30,14 +28,6 @@ function Assert-RegularFile {
     return $item
 }
 
-function Normalize-Thumbprint {
-    param([AllowNull()][string]$Value)
-    if ([string]::IsNullOrWhiteSpace($Value)) {
-        return ""
-    }
-    return $Value.Replace(" ", "").ToUpperInvariant()
-}
-
 Assert-RealDirectory -Path $release
 $driverDirectory = Join-Path $release "driver"
 Assert-RealDirectory -Path $driverDirectory
@@ -53,21 +43,10 @@ $paths = [ordered]@{
 $results = foreach ($entry in $paths.GetEnumerator()) {
     $item = Assert-RegularFile -Path $entry.Value
     $hash = (Get-FileHash -LiteralPath $entry.Value -Algorithm SHA256).Hash
-    $signature = if ($entry.Value.EndsWith(".exe", [StringComparison]::OrdinalIgnoreCase)) {
-        Get-AuthenticodeSignature -LiteralPath $entry.Value
-    } else {
-        $null
-    }
     [pscustomobject]@{
         Resource = $entry.Key
         Bytes = $item.Length
         Sha256 = $hash
-        Signature = if ($null -eq $signature) { "NotChecked" } else { $signature.Status.ToString() }
-        SignerThumbprint = if ($null -eq $signature -or $null -eq $signature.SignerCertificate) {
-            ""
-        } else {
-            $signature.SignerCertificate.Thumbprint
-        }
     }
 }
 
@@ -82,27 +61,5 @@ if ($byName.Installer.Sha256 -ne $ExpectedInstallerSha256) {
     throw "driver installer SHA-256 does not match the build-time pin"
 }
 
-if ($RequireSignature) {
-    foreach ($name in @("Application", "HelperBuild", "HelperPackage", "Installer")) {
-        if ($byName[$name].Signature -ne "Valid") {
-            throw "Authenticode signature is not valid for $name"
-        }
-    }
-
-    $expected = Normalize-Thumbprint -Value $ExpectedAppThumbprint
-    if ([string]::IsNullOrWhiteSpace($expected)) {
-        throw "ExpectedAppThumbprint is required when signature enforcement is enabled"
-    }
-    foreach ($name in @("Application", "HelperBuild", "HelperPackage")) {
-        $actual = Normalize-Thumbprint -Value $byName[$name].SignerThumbprint
-        if ($actual -ne $expected) {
-            throw "signer thumbprint does not match the release certificate for $name"
-        }
-    }
-}
-
 $results | Format-Table -AutoSize
-if (-not $RequireSignature -and ($results | Where-Object { $_.Signature -eq "NotSigned" })) {
-    Write-Warning "One or more executable resources are unsigned; hash verification passed, production signing did not."
-}
 Write-Host "Release resource verification passed: $release"

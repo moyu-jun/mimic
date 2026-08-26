@@ -203,9 +203,9 @@ recovery   criticalRuntime | localOperation | optionalAudio
 - 不接受任意命令、任意路径或附加参数；
 - 主程序在 UAC 前校验 build-time 固化的 helper SHA-256，helper 执行动作前再校验安装器固化 SHA-256；
 - helper 拒绝关键目录/文件的 Windows 重解析点，重启只执行 System32 下的 `shutdown.exe` 和固定参数；
-- 发布脚本先构建（可选签名）helper，再把其最终 SHA-256 嵌入主程序，最后验证打包副本哈希一致。
+- 发布脚本先构建 helper，再把其最终 SHA-256 嵌入主程序，最后验证构建副本和打包副本哈希一致。
 
-正式生产发布仍必须提供 Authenticode 证书，对应用、helper 和安装器完成签名及证书生命周期治理；没有证书的本地构建仅证明强哈希闭环，不等同于签名发布验收。
+当前产品仅按个人、朋友使用及开源项目维护，不面向商业销售或正式渠道分发，因此发布架构只保留 SHA-256 完整性闭环，不包含商业代码签名和证书生命周期流程。若未来改变分发定位，应重新进行威胁建模和发布方案评审。
 
 可写数据固定在：
 
@@ -235,4 +235,4 @@ data/
 
 自动测试覆盖 Runtime 并发/停止、活动不变式、配置事务与原子替换故障、音频双侧提交故障、INI/WAV 任意输入、热键去抖、拾取 token、错误分类和提权协议解析；发布脚本额外校验独立 helper 的参数失败关闭、嵌入哈希和打包副本一致性。独立 fuzz runner 使用固定 seed 变异真实解析入口，崩溃语料落入隔离 artifacts 目录，并由每周 Windows CI 持续运行。
 
-Runtime Actor 的 200 样本 Stop 分布已自动验证 P95 ≤ 100ms、最大值 ≤ 250ms。下列内容仍必须在 Windows 真机发布环境完成：真实键鼠与 Interception 行为、物理驱动释放耗时、UAC 取消和驱动安装/卸载/重启、麦克风设备异常、waveOut 延迟、Authenticode 签名和打包产物签名链。
+Runtime Actor 的 200 样本 Stop 分布已自动验证 P95 ≤ 100ms、最大值 ≤ 250ms。下列内容仍必须在 Windows 真机环境完成：真实键鼠与 Interception 行为、物理驱动释放耗时、UAC 取消和驱动安装/卸载/重启、麦克风设备异常及 waveOut 延迟。
