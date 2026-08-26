@@ -66,6 +66,15 @@ try {
         throw "packaged helper hash does not match the embedded release helper"
     }
 
+    $verifyArguments = @{
+        ReleaseRoot = Join-Path $tauriRoot "target/release"
+    }
+    if (-not [string]::IsNullOrWhiteSpace($CertificateThumbprint)) {
+        $verifyArguments.RequireSignature = $true
+        $verifyArguments.ExpectedAppThumbprint = $CertificateThumbprint
+    }
+    & (Join-Path $PSScriptRoot "verify-release.ps1") @verifyArguments
+
     Write-Host "Release verified: $applicationBuild"
     Write-Host "Helper SHA-256: $sourceHash"
     if ([string]::IsNullOrWhiteSpace($CertificateThumbprint)) {

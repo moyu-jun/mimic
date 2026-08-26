@@ -25,3 +25,4 @@ dist-ssr
 # Generated elevated helper staging asset
 /extra/driver/mimic-elevated-helper.exe
 /src-tauri/fuzz/artifacts/
+/artifacts/

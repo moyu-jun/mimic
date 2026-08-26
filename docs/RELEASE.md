@@ -23,6 +23,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .scriptsuild-release.ps1
 
 没有证书时脚本允许本地验证，但明确输出未签名警告。此类产物不得作为生产签名验收证据。
 
+可单独运行 `scripts/verify-release.ps1` 复核哈希；正式候选包使用 `-RequireSignature -ExpectedAppThumbprint <thumbprint>` 使任一未签名、签名无效或应用/helper 证书指纹不一致都失败关闭。
+
 ## 3. 安全失败策略
 
 - helper 缺失、哈希不匹配或位于重解析点：主程序不请求 UAC。

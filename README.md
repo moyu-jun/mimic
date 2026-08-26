@@ -76,6 +76,7 @@ mimic/
 
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — 后端架构设计（模拟核心 + 应用层，已完成）
 - [docs/RELEASE.md](docs/RELEASE.md) — Windows 发布、独立提权 helper 与签名流程
+- [docs/WINDOWS_ACCEPTANCE.md](docs/WINDOWS_ACCEPTANCE.md) — Stop 延迟、发布预检与真机验收矩阵
 - [docs/REQUIREMENTS.md](docs/REQUIREMENTS.md) — 功能需求与行为约束
 - [docs/DESIGN.md](docs/DESIGN.md) — 技术设计与模块划分
 - [docs/TASKS.md](docs/TASKS.md) — 实施顺序与阶段验收

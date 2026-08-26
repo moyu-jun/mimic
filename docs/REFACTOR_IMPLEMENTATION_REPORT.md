@@ -10,7 +10,7 @@
 
 旧共享停止标志、跨运行公共事件队列、`simulation_worker` 和 executor/scheduler 已删除。输入运行链路由单线程 Actor 独占驱动、计时、游标和按下账本。Stop 成功返回时旧运行已经终止且输入账本已释放；释放失败进入明确错误态。
 
-当前自动化基线为 54 项 Rust 单元/有界属性测试全部通过，前端生产构建和完整 release 发布链通过。最终门禁结果见第 4 节；真实驱动、UAC、麦克风、音频设备和延迟数据仍不得用自动测试替代。
+当前自动化基线为 55 项 Rust 单元/有界属性测试全部通过，前端生产构建和完整 release 发布链通过。最终门禁结果见第 4 节；真实驱动、UAC、麦克风、音频设备和延迟数据仍不得用自动测试替代。
 
 ## 2. 已完成改造
 
@@ -18,6 +18,7 @@
 
 - Runtime Actor 使用有界控制通道和同步 reply，Start 返回唯一 `run_id`。
 - Delay 可被 Stop/Shutdown 打断，快速重启不会恢复旧 run。
+- Stop 延迟以 200 样本分布测试同时约束 P95 ≤ 100ms、最大值 ≤ 250ms；本机三次 P95 为 56～121µs、最大值为 281～473µs。
 - 成功发送的 KeyDown/MouseDown 才进入输入账本；释放成功才移除。
 - Stop/Shutdown 尽力逆序释放；失败保留账本并报告故障。
 - `InputDriver` 由 Actor 独占，可用 FakeDriver 测试。
@@ -107,19 +108,22 @@
 | `cargo fmt --check` | 通过 |
 | `cargo check --all-targets --all-features` | 通过 |
 | `cargo clippy --all-targets --all-features -- -D warnings` | 通过，零警告 |
-| `cargo test --workspace --all-targets` | 通过，54 passed / 0 failed |
+| `cargo test --workspace --all-targets` | 通过，55 passed / 0 failed |
 | `npm run build` | 通过，61 modules |
 | `scripts/run-fuzz.ps1 -Iterations 500000` | 通过；固定 seed，500,000 cases，零 panic，112,517 cases/s |
+| `scripts/measure-stop-latency.ps1 -Runs 3` | 通过；三次各 200 样本，P95 56～121µs，最大 281～473µs |
+| `scripts/verify-release.ps1` | 通过；普通文件、重解析点、helper 副本和安装器固化哈希均通过 |
+| `verify-release.ps1 -RequireSignature` | 正确拒绝当前未签名产物，exit 1 |
+| `scripts/windows-acceptance.ps1` | 只读预检通过并生成验收记录；当前无 Interception、产物未签名 |
 | `scripts/build-release.ps1` | 通过；主程序、helper、资源和打包副本哈希闭环通过 |
 | `git diff --check` | 通过；仅 CRLF 转换提示 |
 | Release helper 失败关闭 | 空参数和未知操作均退出 64，未进入 UAC 或维护动作；helper/打包副本 SHA-256 一致 |
-| CodeGraph | 已同步，69 files / 1,108 nodes / 2,958 edges |
+| CodeGraph | 已同步，69 files / 1,109 nodes / 2,963 edges |
 
 ## 5. 剩余发布门禁
 
 1. **Authenticode 发布链**：签名应用、helper 和安装器，定义证书保管、轮换、吊销和 CI 签名流程。
-2. **Windows 真机矩阵**：验证真实键鼠、Interception、同键启停、透传、UAC 取消/失败、安装/卸载/重启、麦克风占用/拒绝、音频设备缺失和播放延迟。
-3. **性能门禁**：测量 Stop P95 ≤ 100ms、最坏 ≤ 250ms；音频首播延迟由用户实测验收。
+2. **Windows 真机矩阵**：验证真实键鼠、Interception、物理驱动停止释放、同键启停、透传、UAC 取消/失败、安装/卸载/重启、麦克风占用/拒绝、音频设备缺失和用户播放延迟验收。
 
 ## 6. 下一步顺序
 

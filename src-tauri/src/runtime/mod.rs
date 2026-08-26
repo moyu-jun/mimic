@@ -790,6 +790,51 @@ mod tests {
     }
 
     #[test]
+    fn stop_latency_distribution_meets_budget() {
+        const SAMPLE_COUNT: usize = 200;
+        let (runtime, _calls, notifications) = runtime(None);
+        let mut samples = Vec::with_capacity(SAMPLE_COUNT);
+
+        for index in 0..SAMPLE_COUNT {
+            let scan_code = 50 + (index % 50) as u16;
+            runtime
+                .start(key_down_sequence(scan_code, 60_000), RuntimeMode::Keyboard)
+                .unwrap();
+            assert_eq!(
+                notifications.recv_timeout(Duration::from_secs(1)).unwrap(),
+                format!("key:{scan_code}:down")
+            );
+
+            let started = Instant::now();
+            assert_eq!(runtime.stop().unwrap(), StopOutcome::Stopped);
+            samples.push(started.elapsed());
+            assert_eq!(
+                notifications.recv_timeout(Duration::from_secs(1)).unwrap(),
+                format!("key:{scan_code}:up")
+            );
+        }
+
+        samples.sort_unstable();
+        let p95_index = (samples.len() * 95).div_ceil(100) - 1;
+        let p95 = samples[p95_index];
+        let worst = *samples.last().unwrap();
+        println!(
+            "stop_latency samples={SAMPLE_COUNT} p95_us={} max_us={}",
+            p95.as_micros(),
+            worst.as_micros()
+        );
+
+        assert!(
+            p95 <= Duration::from_millis(100),
+            "stop latency P95 {p95:?} exceeds 100ms"
+        );
+        assert!(
+            worst <= Duration::from_millis(250),
+            "stop latency maximum {worst:?} exceeds 250ms"
+        );
+    }
+
+    #[test]
     fn quick_restart_does_not_resume_old_run() {
         let (runtime, calls, notifications) = runtime(None);
         runtime
