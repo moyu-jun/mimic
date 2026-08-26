@@ -933,9 +933,9 @@ npm run build
 - [x] 模拟任务、驱动、计时和按下账本由单个 Actor 所有。
 - [x] 不存在共享 stop flag、跨 run 公共事件积压和游离模拟线程。
 - [x] 核心 Runtime 不依赖 Tauri。
-- [ ] 每个后台线程都有 Handle、Shutdown 和 Join。
+- [x] 每个长期后台线程都有 Handle、受控停止和 Join；一次性音频预热任务由 Handle 在析构时 Join。
 - [x] AppState 不再保存线程亲和上下文。
-- [ ] Navigation、Activity、SimulationMode、RuntimeHealth 和 ErrorRecoveryPolicy 是状态及错误终态的唯一事实来源。
+- [x] Navigation、Activity、SimulationMode、RuntimeHealth 和 ErrorRecoveryPolicy 是状态及错误终态的唯一事实来源。
 
 ### 正确性
 
@@ -944,7 +944,7 @@ npm run build
 - [x] Delay 可中断，停止延迟 P95 不超过 100ms、最坏不超过 250ms（200 样本自动分布门禁）。
 - [x] 配置内存值与落盘值一致。
 - [x] 录音、拾取和运行时 session 不会相互串台。
-- [ ] 所有 FFI/send/文件解析错误均被处理。
+- [x] 关键 FFI、跨线程控制、UI 事件发送和文件解析错误均被返回或记录；调用方已离线的 reply/测试通知仅按协议容忍。
 
 ### 安全
 
@@ -953,7 +953,7 @@ npm run build
 - [x] portable data 与可执行资源逻辑隔离，每次提权前验证 helper/安装器签名或固化哈希。
 - [x] 路径、长度、次数、时长和文件大小均有上限。
 - [x] CSP/capabilities/opener 按最小权限配置。
-- [ ] unsafe 块最小化并有 Safety 说明。
+- [x] unsafe 块已收敛到 Windows FFI/句柄边界，每处均有 `SAFETY` 前提并检查关键返回码。
 
 ### 验证
 
@@ -961,8 +961,11 @@ npm run build
 - [x] Runtime 生命周期并发测试通过。
 - [x] WAV/config fuzz 或 property tests 通过；固定 seed runner、语料、artifact 和每周 Windows CI 已建立。
 - [ ] Windows 手工矩阵通过。
-- [ ] 发布构建、签名和资源校验通过。
+- [x] 未签名 release 构建、资源/重解析点/固化哈希校验通过，签名强制门禁能正确拒绝未签名产物。
+- [ ] 正式候选包 Authenticode 签名及证书指纹校验通过。
 - [x] 架构、错误码、线程所有权和运维文档已更新。
+
+> 代码与自动化范围内的改造已完成。仍未勾选的两项依赖正式签名证书以及装有 Interception 和真实键鼠/音频设备的专用 Windows 验收机，不能由本地未签名构建或 FakeDriver 结果替代。
 
 ## 17. 风险登记表
 

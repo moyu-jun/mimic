@@ -10,7 +10,7 @@
 
 旧共享停止标志、跨运行公共事件队列、`simulation_worker` 和 executor/scheduler 已删除。输入运行链路由单线程 Actor 独占驱动、计时、游标和按下账本。Stop 成功返回时旧运行已经终止且输入账本已释放；释放失败进入明确错误态。
 
-当前自动化基线为 55 项 Rust 单元/有界属性测试全部通过，前端生产构建和完整 release 发布链通过。最终门禁结果见第 4 节；真实驱动、UAC、麦克风、音频设备和延迟数据仍不得用自动测试替代。
+当前自动化基线为 56 项 Rust 单元/有界属性测试全部通过，前端生产构建和完整 release 发布链通过。最终门禁结果见第 4 节；真实驱动、UAC、麦克风、音频设备和延迟数据仍不得用自动测试替代。
 
 ## 2. 已完成改造
 
@@ -18,9 +18,10 @@
 
 - Runtime Actor 使用有界控制通道和同步 reply，Start 返回唯一 `run_id`。
 - Delay 可被 Stop/Shutdown 打断，快速重启不会恢复旧 run。
-- Stop 延迟以 200 样本分布测试同时约束 P95 ≤ 100ms、最大值 ≤ 250ms；本机三次 P95 为 56～121µs、最大值为 281～473µs。
+- Stop 延迟以 200 样本分布测试同时约束 P95 ≤ 100ms、最大值 ≤ 250ms；最终本机三次 P95 为 142～185µs、最大值为 206～508µs。
 - 成功发送的 KeyDown/MouseDown 才进入输入账本；释放成功才移除。
 - Stop/Shutdown 尽力逆序释放；失败保留账本并报告故障。
+- Shutdown 释放失败会返回 `RuntimeError::Driver`、进入 Error 并保留未释放账本；断连关闭路径也会记录失败，不再吞错。
 - `InputDriver` 由 Actor 独占，可用 FakeDriver 测试。
 - Interception 设备缓存发送失败后会重新发现，发送数量不完整视为错误。
 
@@ -52,6 +53,8 @@
 - 录音临时 WAV 使用独占创建，完成写入、同步和格式验证后才提交。
 - 启动后后台读盘、预开设备并准备缓冲；失败回写 `RuntimeHealth::Degraded { audio }`。
 - 音频仍只支持需求确定的 PCM WAV。
+- 录音样本/发布缓冲锁失败会发出错误而非伪造完成；所有 recorder UI 事件发送失败均记录。
+- WinMM 调用逐项检查返回码；音频句柄/缓冲的 `unsafe Send` 与 FFI 均记录内存、同步和生命周期前提；header 取消准备失败时保守保留缓冲，避免释放仍被驱动引用的 PCM。
 
 ### 2.5 错误协议与恢复分类
 
@@ -81,6 +84,7 @@
 - 发布脚本按“helper 构建/可选签名 → 固化最终哈希 → 主程序构建/可选签名 → 打包副本复核”执行。
 - `PortablePaths` 规范化当前可执行文件路径；数据目录和固定文件拒绝符号链接/Windows 重解析点。
 - CSP、capabilities 和构建资源检查已收紧。
+- Windows 令牌、注册表、进程、路径、光标、屏幕指标和 WinMM FFI 均有最小作用域 `SAFETY` 契约；关键句柄关闭结果显式检查。
 
 ### 2.8 有界属性与恶意输入测试
 
@@ -88,7 +92,7 @@
 - 512 组确定性任意 INI 文本不得 panic。
 - 配置在候选写入/同步完成后的原子替换故障会保留旧文件并清理临时文件。
 - 音频文件发布失败不会切换内存候选；成功路径仅交换一次。
-- 独立变异 runner 对真实 INI/WAV 入口完成 500,000 次固定 seed 运行，112,517 cases/s，零 panic。
+- 独立变异 runner 对真实 INI/WAV 入口完成 500,000 次固定 seed 运行，36,740 cases/s，13.61 秒完成且零 panic。
 - 每周 Windows CI 执行 2,000,000 次变异，失败时上传可复现 crash artifact。
 - 256 组、每组 256 步的活动获取/释放序列保持单所有者不变式。
 - 提权协议拒绝未知动作、错误版本、零/非法 PID、非法 nonce 和额外参数。
@@ -108,17 +112,17 @@
 | `cargo fmt --check` | 通过 |
 | `cargo check --all-targets --all-features` | 通过 |
 | `cargo clippy --all-targets --all-features -- -D warnings` | 通过，零警告 |
-| `cargo test --workspace --all-targets` | 通过，55 passed / 0 failed |
+| `cargo test --workspace --all-targets` | 通过，56 passed / 0 failed |
 | `npm run build` | 通过，61 modules |
-| `scripts/run-fuzz.ps1 -Iterations 500000` | 通过；固定 seed，500,000 cases，零 panic，112,517 cases/s |
-| `scripts/measure-stop-latency.ps1 -Runs 3` | 通过；三次各 200 样本，P95 56～121µs，最大 281～473µs |
+| `scripts/run-fuzz.ps1 -Iterations 500000` | 通过；固定 seed，500,000 cases，零 panic，36,740 cases/s（13.61 秒） |
+| `scripts/measure-stop-latency.ps1 -Runs 3` | 通过；三次各 200 样本，P95 142～185µs，最大 206～508µs |
 | `scripts/verify-release.ps1` | 通过；普通文件、重解析点、helper 副本和安装器固化哈希均通过 |
 | `verify-release.ps1 -RequireSignature` | 正确拒绝当前未签名产物，exit 1 |
 | `scripts/windows-acceptance.ps1` | 只读预检通过并生成验收记录；当前无 Interception、产物未签名 |
-| `scripts/build-release.ps1` | 通过；主程序、helper、资源和打包副本哈希闭环通过 |
+| `scripts/build-release.ps1` | 通过；主程序 9,536,512 bytes，helper 265,216 bytes；helper 构建/打包 SHA-256 均为 `781B9AD7…48E24D59` |
 | `git diff --check` | 通过；仅 CRLF 转换提示 |
 | Release helper 失败关闭 | 空参数和未知操作均退出 64，未进入 UAC 或维护动作；helper/打包副本 SHA-256 一致 |
-| CodeGraph | 已同步，69 files / 1,109 nodes / 2,963 edges |
+| CodeGraph | 已同步，69 files / 1,111 nodes / 2,987 edges |
 
 ## 5. 剩余发布门禁
 

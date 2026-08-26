@@ -21,10 +21,14 @@ pub struct ListenerHandle {
 
 impl Drop for ListenerHandle {
     fn drop(&mut self) {
-        let _ = self.shutdown_tx.try_send(());
+        if self.shutdown_tx.try_send(()).is_err() {
+            log::debug!("[listener] shutdown signal was already pending or listener stopped");
+        }
         if let Ok(join) = self.join.get_mut() {
             if let Some(join) = join.take() {
-                let _ = join.join();
+                if join.join().is_err() {
+                    error!("[listener] listener thread panicked during drop");
+                }
             }
         }
     }
@@ -45,12 +49,18 @@ pub fn start_listener(app: AppHandle, state: SharedState) -> Result<ListenerHand
             join: Mutex::new(Some(join)),
         }),
         Ok(Err(error)) => {
-            let _ = join.join();
+            if join.join().is_err() {
+                log::error!("[listener] initialization thread panicked after reporting failure");
+            }
             Err(error)
         }
         Err(_) => {
-            let _ = shutdown_tx.try_send(());
-            let _ = join.join();
+            if shutdown_tx.try_send(()).is_err() {
+                log::debug!("[listener] initialization shutdown signal was not accepted");
+            }
+            if join.join().is_err() {
+                log::error!("[listener] initialization thread panicked after timeout");
+            }
             Err("listener initialization timed out".to_string())
         }
     }
@@ -65,7 +75,12 @@ fn run_listener(
     let interception = match interception::Interception::new() {
         Some(context) => context,
         None => {
-            let _ = ready_tx.send(Err("failed to create listener context".to_string()));
+            if ready_tx
+                .send(Err("failed to create listener context".to_string()))
+                .is_err()
+            {
+                log::debug!("[listener] startup receiver was dropped before failure report");
+            }
             return;
         }
     };
@@ -184,6 +199,7 @@ fn read_cursor_pos() -> Option<(i32, i32)> {
     use windows_sys::Win32::Foundation::POINT;
     use windows_sys::Win32::UI::WindowsAndMessaging::GetCursorPos;
     let mut point = POINT { x: 0, y: 0 };
+    // SAFETY: point is a valid writable POINT and GetCursorPos does not retain the pointer.
     if unsafe { GetCursorPos(&mut point) } != 0 {
         Some((point.x, point.y))
     } else {

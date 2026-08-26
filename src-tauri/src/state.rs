@@ -151,7 +151,9 @@ impl AppState {
 impl Drop for AppState {
     fn drop(&mut self) {
         if let Some(runtime) = &self.runtime {
-            let _ = runtime.shutdown();
+            if let Err(error) = runtime.shutdown() {
+                log::error!("[state] runtime shutdown during AppState drop failed: {error}");
+            }
         }
     }
 }

@@ -5,7 +5,7 @@
 在仓库根目录执行：
 
 ~~~powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .scriptsuild-release.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\build-release.ps1
 ~~~
 
 脚本依次完成前端生产构建、Rust workspace 的 fmt/check/clippy/test、独立 helper release 构建、主程序 release 构建和打包副本 SHA-256 复核。release 模式下若 staging helper 缺失，`build.rs` 会失败关闭，禁止生成未固化 helper 哈希的主程序。
@@ -16,7 +16,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .scriptsuild-release.ps1
 
 ~~~powershell
 $env:MIMIC_SIGNING_CERT_THUMBPRINT = '<certificate-thumbprint>'
-powershell -NoProfile -ExecutionPolicy Bypass -File .scriptsuild-release.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\build-release.ps1
 ~~~
 
 脚本先签名 helper 并验证 `Get-AuthenticodeSignature` 为 `Valid`，再把签名后文件的 SHA-256 固化到主程序，最后签名主程序。驱动安装器必须由其发布流程预先签名；其最终 SHA-256 由 `build.rs` 固化并由主程序和 helper 在执行前复核。

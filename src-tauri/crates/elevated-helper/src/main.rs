@@ -100,8 +100,8 @@ mod windows_helper {
             )
         };
         // SAFETY: token was returned by OpenProcessToken and is closed exactly once.
-        unsafe { CloseHandle(token) };
-        if query_ok == 0 || returned < size_of::<TOKEN_ELEVATION>() as u32 {
+        let close_ok = unsafe { CloseHandle(token) };
+        if query_ok == 0 || close_ok == 0 || returned < size_of::<TOKEN_ELEVATION>() as u32 {
             return Err("helper_token_unavailable".to_string());
         }
         // SAFETY: GetTokenInformation succeeded and initialized the complete TOKEN_ELEVATION value.
@@ -126,8 +126,8 @@ mod windows_helper {
         let query_ok =
             unsafe { QueryFullProcessImageNameW(process, 0, image.as_mut_ptr(), &mut length) };
         // SAFETY: process was returned by OpenProcess and is closed exactly once.
-        unsafe { CloseHandle(process) };
-        if query_ok == 0 || length == 0 || length as usize > image.len() {
+        let close_ok = unsafe { CloseHandle(process) };
+        if query_ok == 0 || close_ok == 0 || length == 0 || length as usize > image.len() {
             return Err("helper_caller_unavailable".to_string());
         }
 

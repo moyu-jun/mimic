@@ -560,7 +560,14 @@ where
     })();
 
     if write_result.is_err() {
-        let _ = std::fs::remove_file(&temporary);
+        match std::fs::remove_file(&temporary) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => log::warn!(
+                "[config] failed to remove temporary config {}: {error}",
+                temporary.display()
+            ),
+        }
     }
     write_result
 }

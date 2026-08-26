@@ -32,10 +32,14 @@ struct PickerTimeoutInner {
 
 impl Drop for PickerTimeoutInner {
     fn drop(&mut self) {
-        let _ = self.command_tx.send(TimeoutCommand::Shutdown);
+        if self.command_tx.send(TimeoutCommand::Shutdown).is_err() {
+            log::debug!("[mouse_picker] timeout service already stopped during drop");
+        }
         if let Ok(join) = self.join.get_mut() {
             if let Some(join) = join.take() {
-                let _ = join.join();
+                if join.join().is_err() {
+                    log::error!("[mouse_picker] timeout service panicked during drop");
+                }
             }
         }
     }
@@ -110,7 +114,14 @@ impl PickerTimeoutHandle {
     }
 
     fn cancel(&self, token: u64) {
-        let _ = self.inner.command_tx.send(TimeoutCommand::Cancel { token });
+        if self
+            .inner
+            .command_tx
+            .send(TimeoutCommand::Cancel { token })
+            .is_err()
+        {
+            log::warn!("[mouse_picker] timeout service unavailable while cancelling token {token}");
+        }
     }
 }
 

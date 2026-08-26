@@ -170,10 +170,12 @@ fn handle_start_hotkey(
         Ok(StartOutcome::NoExecutableActions) => false,
         Err(error) => {
             error!("[listener] start failed: {}", error);
-            let _ = app.emit(
+            if let Err(emit_error) = app.emit(
                 "simulation_start_failed",
                 serde_json::json!({ "error": error }),
-            );
+            ) {
+                error!("[listener] failed to emit simulation_start_failed: {emit_error}");
+            }
             false
         }
     }

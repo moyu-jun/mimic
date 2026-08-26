@@ -147,6 +147,8 @@ pub fn atomic_replace(source: &Path, destination: &Path) -> Result<(), String> {
         .encode_wide()
         .chain(Some(0))
         .collect();
+    // SAFETY: both path buffers are NUL-terminated and remain alive for the duration of the call;
+    // MoveFileExW does not retain either pointer.
     if unsafe {
         MoveFileExW(
             source.as_ptr(),

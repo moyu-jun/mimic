@@ -126,17 +126,27 @@ impl Drop for RuntimeInner {
     fn drop(&mut self) {
         if !self.closed.swap(true, Ordering::AcqRel) {
             let (reply_tx, reply_rx) = mpsc::sync_channel(1);
-            if self
+            match self
                 .command_tx
                 .send(RuntimeCommand::Shutdown { reply: reply_tx })
-                .is_ok()
             {
-                let _ = reply_rx.recv_timeout(SHUTDOWN_TIMEOUT);
+                Ok(()) => match reply_rx.recv_timeout(SHUTDOWN_TIMEOUT) {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => {
+                        log::error!("runtime shutdown during handle drop failed: {error}");
+                    }
+                    Err(error) => {
+                        log::error!("runtime shutdown acknowledgement failed: {error}");
+                    }
+                },
+                Err(_) => log::debug!("runtime actor already stopped during handle drop"),
             }
         }
         if let Ok(join) = self.join.get_mut() {
             if let Some(join) = join.take() {
-                let _ = join.join();
+                if join.join().is_err() {
+                    log::error!("runtime actor panicked during handle drop");
+                }
             }
         }
     }
@@ -162,11 +172,15 @@ impl RuntimeHandle {
             .name("mimic-runtime".to_string())
             .spawn(move || match factory() {
                 Ok(driver) => {
-                    let _ = ready_tx.send(Ok(()));
+                    if ready_tx.send(Ok(())).is_err() {
+                        log::debug!("runtime startup receiver dropped before success report");
+                    }
                     actor_loop(driver, command_rx, actor_snapshot, event_sink);
                 }
                 Err(error) => {
-                    let _ = ready_tx.send(Err(error));
+                    if ready_tx.send(Err(error)).is_err() {
+                        log::debug!("runtime startup receiver dropped before failure report");
+                    }
                 }
             })
             .map_err(|_| RuntimeError::Unavailable)?;
@@ -181,7 +195,9 @@ impl RuntimeHandle {
                 }),
             }),
             Ok(Err(error)) => {
-                let _ = join.join();
+                if join.join().is_err() {
+                    log::error!("runtime factory thread panicked after reporting failure");
+                }
                 Err(error)
             }
             Err(_) => Err(RuntimeError::Timeout("runtime startup")),
@@ -362,13 +378,17 @@ fn actor_loop<D: InputDriver>(
                     }
                 }
                 Err(_) => {
-                    shutdown_actor(
+                    if let Err(error) = shutdown_actor(
                         &mut active,
                         &mut ledger,
                         &mut driver,
                         &snapshot,
                         &event_sink,
-                    );
+                    ) {
+                        log::error!(
+                            "runtime shutdown after idle command disconnect failed: {error}"
+                        );
+                    }
                     return;
                 }
             }
@@ -391,13 +411,15 @@ fn actor_loop<D: InputDriver>(
                 continue;
             }
             Err(mpsc::TryRecvError::Disconnected) => {
-                shutdown_actor(
+                if let Err(error) = shutdown_actor(
                     &mut active,
                     &mut ledger,
                     &mut driver,
                     &snapshot,
                     &event_sink,
-                );
+                ) {
+                    log::error!("runtime shutdown after active command disconnect failed: {error}");
+                }
                 return;
             }
             Err(mpsc::TryRecvError::Empty) => {}
@@ -475,7 +497,9 @@ fn wait_delay<D: InputDriver>(
             }
             Err(RecvTimeoutError::Timeout) => return true,
             Err(RecvTimeoutError::Disconnected) => {
-                shutdown_actor(active, ledger, driver, snapshot, event_sink);
+                if let Err(error) = shutdown_actor(active, ledger, driver, snapshot, event_sink) {
+                    log::error!("runtime shutdown during delay disconnect failed: {error}");
+                }
                 return false;
             }
         }
@@ -559,8 +583,8 @@ fn handle_command<D: InputDriver>(
             true
         }
         RuntimeCommand::Shutdown { reply } => {
-            shutdown_actor(active, ledger, driver, snapshot, event_sink);
-            let _ = reply.send(Ok(()));
+            let result = shutdown_actor(active, ledger, driver, snapshot, event_sink);
+            let _ = reply.send(result);
             false
         }
     }
@@ -645,11 +669,32 @@ fn shutdown_actor<D: InputDriver>(
     driver: &mut D,
     snapshot: &Arc<RwLock<RuntimeSnapshot>>,
     event_sink: &EventSink,
-) {
-    active.take();
-    let _ = ledger.release_all(driver);
-    set_snapshot(snapshot, RuntimePhase::Shutdown, ledger.len());
-    event_sink(RuntimeEvent::Shutdown);
+) -> Result<(), RuntimeError> {
+    let run = active.take();
+    let release_errors = ledger.release_all(driver);
+    if release_errors.is_empty() {
+        set_snapshot(snapshot, RuntimePhase::Shutdown, ledger.len());
+        event_sink(RuntimeEvent::Shutdown);
+        return Ok(());
+    }
+
+    let message = format!(
+        "failed to release inputs during shutdown: {}",
+        release_errors.join("; ")
+    );
+    set_snapshot(
+        snapshot,
+        RuntimePhase::Error {
+            message: message.clone(),
+        },
+        ledger.len(),
+    );
+    event_sink(RuntimeEvent::Failed {
+        run_id: run.map(|value| value.run_id),
+        message: message.clone(),
+        pressed_count: ledger.len(),
+    });
+    Err(RuntimeError::Driver(message))
 }
 
 fn set_snapshot(
@@ -913,6 +958,26 @@ mod tests {
         assert!(matches!(runtime.snapshot().phase, RuntimePhase::Shutdown));
         assert!(matches!(
             runtime.start(key_down_sequence(43, 10), RuntimeMode::Keyboard),
+            Err(RuntimeError::Unavailable)
+        ));
+    }
+    #[test]
+    fn shutdown_release_failure_is_reported_and_preserves_ledger() {
+        let (runtime, _calls, notifications) = runtime(Some(2));
+        runtime
+            .start(key_down_sequence(44, 10_000), RuntimeMode::Keyboard)
+            .unwrap();
+        assert_eq!(
+            notifications.recv_timeout(Duration::from_secs(1)).unwrap(),
+            "key:44:down"
+        );
+
+        assert!(matches!(runtime.shutdown(), Err(RuntimeError::Driver(_))));
+        let snapshot = runtime.snapshot();
+        assert!(matches!(snapshot.phase, RuntimePhase::Error { .. }));
+        assert_eq!(snapshot.pressed_count, 1);
+        assert!(matches!(
+            runtime.start(key_down_sequence(45, 10), RuntimeMode::Keyboard),
             Err(RuntimeError::Unavailable)
         ));
     }

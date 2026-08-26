@@ -1,11 +1,10 @@
 //! Interception driver detection and restricted elevated maintenance.
 //!
 //! The normal Tauri process never elevates itself into the UI path. For install, uninstall, or
-//! reboot it launches the current executable with a fixed helper switch through `runas`. The
-//! elevated branch runs before Tauri initialization, accepts exactly one built-in action through a
-//! versioned one-time request, verifies both its elevated token and the calling executable,
-//! revalidates the pinned installer hash, and invokes fixed executables and arguments without a
-//! shell.
+//! reboot it launches a separately built, hash-pinned helper through `runas`. The helper accepts
+//! exactly one built-in action through a versioned one-time request, verifies both its elevated
+//! token and the calling executable, revalidates the pinned installer hash, and invokes fixed
+//! executables and arguments without a shell.
 use crate::state::DriverStatus;
 use sha2::{Digest, Sha256};
 use std::io::Read;
@@ -22,7 +21,10 @@ pub(crate) fn is_process_elevated() -> Result<bool, String> {
         use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
         let mut token: HANDLE = std::ptr::null_mut();
-        if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
+        // SAFETY: GetCurrentProcess returns the documented pseudo-handle; token is a valid writable
+        // out pointer, and TOKEN_QUERY is the minimum access needed by GetTokenInformation.
+        let open_ok = unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) };
+        if open_ok == 0 {
             return Err(format!(
                 "admin_status_open_token_failed:{}",
                 std::io::Error::last_os_error()
@@ -31,6 +33,8 @@ pub(crate) fn is_process_elevated() -> Result<bool, String> {
 
         let mut elevation = MaybeUninit::<TOKEN_ELEVATION>::zeroed();
         let mut returned = 0_u32;
+        // SAFETY: token was opened above, the output buffer is correctly sized and aligned, and
+        // returned points to writable storage for the byte count.
         let query_ok = unsafe {
             GetTokenInformation(
                 token,
@@ -41,14 +45,20 @@ pub(crate) fn is_process_elevated() -> Result<bool, String> {
             )
         };
         let query_error = (query_ok == 0).then(std::io::Error::last_os_error);
-        unsafe { CloseHandle(token) };
+        // SAFETY: token is an owned real handle from OpenProcessToken and is closed exactly once.
+        let close_ok = unsafe { CloseHandle(token) };
+        let close_error = (close_ok == 0).then(std::io::Error::last_os_error);
 
         if let Some(error) = query_error {
             return Err(format!("admin_status_query_failed:{error}"));
         }
+        if let Some(error) = close_error {
+            return Err(format!("admin_status_close_token_failed:{error}"));
+        }
         if returned < size_of::<TOKEN_ELEVATION>() as u32 {
             return Err("admin_status_query_failed:short_response".to_string());
         }
+        // SAFETY: GetTokenInformation succeeded and reported a complete TOKEN_ELEVATION value.
         Ok(unsafe { elevation.assume_init() }.TokenIsElevated != 0)
     }
     #[cfg(not(windows))]
@@ -117,6 +127,7 @@ pub fn reboot_system() -> Result<(), String> {
 
 #[cfg(windows)]
 fn check_driver_windows() -> DriverStatus {
+    use windows_sys::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND};
     use windows_sys::Win32::System::Registry::{
         RegCloseKey, RegOpenKeyExW, HKEY_LOCAL_MACHINE, KEY_READ,
     };
@@ -131,20 +142,35 @@ fn check_driver_windows() -> DriverStatus {
     let keyboard_path = encode_wide("SYSTEM\\CurrentControlSet\\Services\\keyboard");
     let mouse_path = encode_wide("SYSTEM\\CurrentControlSet\\Services\\mouse");
     let service_paths: &[&[u16]] = &[&keyboard_path, &mouse_path];
+    let mut registry_query_failed = false;
 
     for path in service_paths {
         let mut hkey = std::ptr::null_mut();
+        // SAFETY: path is a NUL-terminated UTF-16 buffer and hkey is a valid writable out pointer.
         let status =
             unsafe { RegOpenKeyExW(HKEY_LOCAL_MACHINE, path.as_ptr(), 0, KEY_READ, &mut hkey) };
         if status == 0 {
-            unsafe { RegCloseKey(hkey) };
+            // SAFETY: hkey is an owned handle returned by the successful RegOpenKeyExW call.
+            let close_status = unsafe { RegCloseKey(hkey) };
+            if close_status != 0 {
+                log::warn!("[driver] failed to close service registry key: {close_status}");
+            }
             log::info!("[driver] registry service key found but context failed, need reboot");
             return DriverStatus::InstalledNeedReboot;
         }
+        if !matches!(status, ERROR_FILE_NOT_FOUND | ERROR_PATH_NOT_FOUND) {
+            registry_query_failed = true;
+            log::warn!("[driver] service registry query failed: {status}");
+        }
     }
 
-    log::info!("[driver] no registry service key found, driver not installed");
-    DriverStatus::NotInstalled
+    if registry_query_failed {
+        log::error!("[driver] driver status is unknown because registry queries failed");
+        DriverStatus::Error
+    } else {
+        log::info!("[driver] no registry service key found, driver not installed");
+        DriverStatus::NotInstalled
+    }
 }
 
 #[cfg(windows)]
@@ -228,7 +254,10 @@ fn run_elevated_helper_windows(action: &str) -> Result<(), String> {
     let wait = unsafe { WaitForSingleObject(execute.hProcess, INFINITE) };
     if wait != WAIT_OBJECT_0 {
         // SAFETY: the process handle is owned by this function and closed exactly once.
-        unsafe { CloseHandle(execute.hProcess) };
+        let close_ok = unsafe { CloseHandle(execute.hProcess) };
+        if close_ok == 0 {
+            log::warn!("[driver] failed to close helper process after wait failure");
+        }
         return Err(format!("helper_wait_failed:{wait}"));
     }
 
@@ -238,9 +267,14 @@ fn run_elevated_helper_windows(action: &str) -> Result<(), String> {
     // SAFETY: GetLastError is read immediately after a failed query.
     let exit_error = (exit_ok == 0).then(|| unsafe { GetLastError() });
     // SAFETY: the process handle is owned by this function and closed exactly once.
-    unsafe { CloseHandle(execute.hProcess) };
+    let close_ok = unsafe { CloseHandle(execute.hProcess) };
+    // SAFETY: GetLastError is read immediately after a failed close.
+    let close_error = (close_ok == 0).then(|| unsafe { GetLastError() });
     if let Some(code) = exit_error {
         return Err(format!("helper_exit_query_failed:{code}"));
+    }
+    if let Some(code) = close_error {
+        return Err(format!("helper_process_close_failed:{code}"));
     }
 
     match exit_code as i32 {
@@ -326,7 +360,14 @@ fn create_helper_request(
         .and_then(|()| file.sync_all())
     {
         drop(file);
-        let _ = std::fs::remove_file(&pending);
+        match std::fs::remove_file(&pending) {
+            Ok(()) => {}
+            Err(cleanup_error) if cleanup_error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(cleanup_error) => log::warn!(
+                "[driver] failed to remove incomplete helper request {}: {cleanup_error}",
+                pending.display()
+            ),
+        }
         return Err(format!("helper_request_write_failed:{error}"));
     }
     Ok(HelperRequestGuard { pending, claimed })

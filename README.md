@@ -65,10 +65,12 @@ mimic/
 
 ## 架构
 
-后端已完成两轮重构（模拟核心 + 应用层，均已实施并校验），整合为单一设计文档：
+后端已完成以生命周期安全和最小权限为核心的重构：
 
-- 统一键鼠事件模型（`SimulationEvent`）+ `InputDriver` 驱动抽象；双线程 + 统一延迟模型，所有延迟在消费线程串行执行，保证时序精确。
-- 应用层分为 `commands/`（命令）、`runner/`（运行生命周期 + `SequenceBuilder`）、`listener/`（监听 + 路由）三层，面向「混合序列 + 更丰富操作类型」可扩展。
+- 单线程 Runtime Actor 独占 `InputDriver`、动作游标、可中断计时和按下账本；Stop/Shutdown 通过有界通道确认，释放失败不会伪装成功。
+- `commands/` 是薄适配层，`runner/` 负责序列构建，监听、录音、拾取和音频预热均由可停止、可 Join 的 Handle 管理。
+- 主应用保持普通权限；驱动安装、卸载和重启仅通过独立、哈希固定、白名单协议的最小 helper 执行。
+- 配置与 WAV 使用候选写入、校验和原子发布，可写数据隔离在 `data/`，固定资源拒绝链接/重解析点。
 
 详见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。
 

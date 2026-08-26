@@ -41,7 +41,16 @@ impl CoordinateMapper {
             use windows_sys::Win32::UI::WindowsAndMessaging::{
                 GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN,
             };
-            unsafe { (GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)) }
+            // SAFETY: these metric indices require no pointers and have no caller-owned lifetime.
+            let size = unsafe { (GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)) };
+            if size.0 <= 0 || size.1 <= 0 {
+                log::error!(
+                    "[coordinate] invalid primary screen metrics: {}x{}",
+                    size.0,
+                    size.1
+                );
+            }
+            size
         }
         #[cfg(not(windows))]
         {

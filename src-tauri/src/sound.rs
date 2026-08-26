@@ -43,7 +43,8 @@ mod inner {
         _pcm: Arc<Vec<u8>>,
     }
 
-    // SAFETY: WAVEHDR + HWAVEOUT are thread-safe when access is serialized by Mutex.
+    // SAFETY: hdr points into the heap allocation owned by _pcm, so moving the struct keeps the
+    // pointer stable. Prepared buffers are only accessed while WaveDevice is behind DEVICE's Mutex.
     unsafe impl Send for PreparedBuf {}
 
     /// wav 文件解析结果
@@ -61,6 +62,8 @@ mod inner {
         bufs: HashMap<&'static str, PreparedBuf>,
     }
 
+    // SAFETY: WinMM waveOut handles may be used from another thread. Every handle/header access is
+    // serialized by DEVICE's Mutex, and CALLBACK_NULL prevents concurrent callback access.
     unsafe impl Send for WaveDevice {}
 
     static DEVICE: OnceLock<Mutex<Option<WaveDevice>>> = OnceLock::new();
@@ -182,6 +185,8 @@ mod inner {
             cbSize: 0,
         };
         let mut handle: HWAVEOUT = std::ptr::null_mut();
+        // SAFETY: handle is a valid writable out pointer, fmt lives through the call, and
+        // CALLBACK_NULL means no callback pointer or instance data is dereferenced.
         let result = unsafe { waveOutOpen(&mut handle, WAVE_MAPPER, &fmt, 0, 0, CALLBACK_NULL) };
         if result == 0 {
             log::info!(
@@ -208,6 +213,8 @@ mod inner {
             lpNext: std::ptr::null_mut(),
             reserved: 0,
         });
+        // SAFETY: handle is open, hdr has the documented size, and its lpData points into pcm_data;
+        // both allocations remain owned by PreparedBuf until the header is unprepared.
         let result = unsafe {
             waveOutPrepareHeader(
                 handle,
@@ -334,17 +341,24 @@ mod inner {
                 return;
             }
         };
-        unsafe {
-            // 打断正在播放的旧声音
-            waveOutReset(dev.handle);
-            // 重置 flags 以便重新提交（WHDR_DONE 清除）
-            buf.hdr.dwFlags &= !0x01; // clear WHDR_DONE
-            buf.hdr.dwFlags |= 0x02; // ensure WHDR_PREPARED stays set
+        // SAFETY: dev.handle is open and all access is serialized by DEVICE's Mutex.
+        let reset_result = unsafe { waveOutReset(dev.handle) };
+        if reset_result != 0 {
+            log::error!("[sound] waveOutReset before playback failed: {reset_result}");
+            return;
+        }
+        // WinMM owns dwFlags after preparation; resubmit the still-prepared header unchanged.
+        // SAFETY: the prepared header and its PCM allocation remain alive in dev.bufs for the call
+        // and the subsequent asynchronous playback.
+        let write_result = unsafe {
             waveOutWrite(
                 dev.handle,
                 buf.hdr.as_mut() as *mut WAVEHDR,
                 std::mem::size_of::<WAVEHDR>() as u32,
-            );
+            )
+        };
+        if write_result != 0 {
+            log::error!("[sound] waveOutWrite failed: {write_result}");
         }
     }
 
@@ -381,8 +395,10 @@ mod inner {
             Err(_) => return,
         };
         if let Some(dev) = guard.as_ref() {
-            unsafe {
-                waveOutReset(dev.handle);
+            // SAFETY: dev.handle is open and all access is serialized by DEVICE's Mutex.
+            let result = unsafe { waveOutReset(dev.handle) };
+            if result != 0 {
+                log::error!("[sound] waveOutReset while purging failed: {result}");
             }
         }
     }
@@ -405,16 +421,35 @@ mod inner {
 
     impl Drop for WaveDevice {
         fn drop(&mut self) {
-            unsafe {
-                waveOutReset(self.handle);
-                for (_, buf) in self.bufs.iter_mut() {
+            // SAFETY: self exclusively owns the open handle during Drop.
+            let reset_result = unsafe { waveOutReset(self.handle) };
+            if reset_result != 0 {
+                log::warn!("[sound] waveOutReset during drop failed: {reset_result}");
+            }
+            for (_, mut buf) in self.bufs.drain() {
+                // SAFETY: each header was prepared on self.handle, remains alive here, and is
+                // unprepared exactly once before its backing PCM is dropped.
+                let result = unsafe {
                     waveOutUnprepareHeader(
                         self.handle,
                         buf.hdr.as_mut() as *mut WAVEHDR,
                         std::mem::size_of::<WAVEHDR>() as u32,
+                    )
+                };
+                if result != 0 {
+                    log::error!(
+                        "[sound] waveOutUnprepareHeader failed: {result}; leaking buffer to preserve driver pointer validity"
                     );
+                    // The driver may still retain lpData after an unprepare failure. Leaking this
+                    // rare failure-path buffer is safer than freeing memory behind that raw pointer.
+                    std::mem::forget(buf);
                 }
-                waveOutClose(self.handle);
+            }
+            // SAFETY: self exclusively owns the handle; successfully unprepared buffers were
+            // dropped and any buffer still retained by the driver was deliberately leaked above.
+            let close_result = unsafe { waveOutClose(self.handle) };
+            if close_result != 0 {
+                log::warn!("[sound] waveOutClose failed: {close_result}");
             }
         }
     }
@@ -497,7 +532,9 @@ impl Drop for AudioWarmupHandle {
     fn drop(&mut self) {
         if let Ok(join) = self.join.get_mut() {
             if let Some(join) = join.take() {
-                let _ = join.join();
+                if join.join().is_err() {
+                    log::error!("[sound] audio warmup thread panicked");
+                }
             }
         }
     }

@@ -5,24 +5,24 @@
 Stop 控制路径使用 FakeDriver 进行 200 样本分布测量，测试包含长 Delay 中断、按键释放和 Stop 同步确认。门槛为 P95 ≤ 100 ms、最大值 ≤ 250 ms。执行：
 
 ~~~powershell
-.scriptsmeasure-stop-latency.ps1 -Runs 3
+.\scripts\measure-stop-latency.ps1 -Runs 3
 ~~~
 
 2026-08-26 当前机器三次结果：
 
 | Run | 样本 | P95 | 最大值 | 结果 |
 | --- | ---: | ---: | ---: | --- |
-| 1 | 200 | 104 µs | 326 µs | 通过 |
-| 2 | 200 | 121 µs | 473 µs | 通过 |
-| 3 | 200 | 56 µs | 281 µs | 通过 |
+| 1 | 200 | 142 µs | 508 µs | 通过 |
+| 2 | 200 | 185 µs | 220 µs | 通过 |
+| 3 | 200 | 164 µs | 206 µs | 通过 |
 
 该结果验证 Runtime Actor、控制通道和输入释放账本，不替代真实 Interception 驱动与物理设备测量。
 
 发布资源校验执行：
 
 ~~~powershell
-.scriptserify-release.ps1
-.scriptserify-release.ps1 -RequireSignature -ExpectedAppThumbprint '<thumbprint>'
+.\scripts\verify-release.ps1
+.\scripts\verify-release.ps1 -RequireSignature -ExpectedAppThumbprint '<thumbprint>'
 ~~~
 
 校验项包括非空普通文件/重解析点拒绝、helper 构建副本与打包副本 SHA-256 一致、安装器 SHA-256 固化值，以及可选的 Authenticode 强制校验。启用签名强制时，应用与两个 helper 副本还必须匹配指定证书指纹。
@@ -32,7 +32,7 @@ Stop 控制路径使用 FakeDriver 进行 200 样本分布测量，测试包含�
 已在 Windows 10 build 19042、AMD64、普通权限进程执行：
 
 ~~~powershell
-.scriptswindows-acceptance.ps1
+.\scripts\windows-acceptance.ps1
 ~~~
 
 资源、重解析点和哈希门禁通过。当前键盘/鼠标 UpperFilters 未检测到 Interception；应用、helper 和安装器均为 `NotSigned`。因此自动预检完成，但驱动真机和正式签名验收不能在当前环境关闭。

@@ -8,7 +8,7 @@
 // Arc<Mutex<>> 共享。波形幅度由录制线程按 ~30fps 经事件推送，避免在音频回调里
 // 直接 emit。
 
-use crate::state::{ActivityLease, RuntimeStatus, SharedState};
+use crate::state::{ActivityLease, SharedState};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::SampleFormat;
 use log::{error, info};
@@ -23,6 +23,12 @@ const MAX_DURATION_SECS: u32 = 5;
 /// 波形 / 自动停止检查间隔（约 30fps）
 const TICK_MS: u64 = 33;
 static AUDIO_TEMP_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+fn emit_recorder_event(app: &AppHandle, event: &str, payload: serde_json::Value) {
+    if let Err(error) = app.emit(event, payload) {
+        error!("[recorder] failed to emit {event}: {error}");
+    }
+}
 
 /// 录制线程控制信号
 pub enum RecCtrl {
@@ -62,10 +68,14 @@ impl Drop for RecordingHandleInner {
         };
         if let Some(mut task) = controller.active.take() {
             if let Some(control) = task.control.take() {
-                let _ = control.send(RecCtrl::Cancel);
+                if control.send(RecCtrl::Cancel).is_err() {
+                    log::debug!("[recorder] worker already stopped during controller drop");
+                }
             }
             if let Some(join) = task.join.take() {
-                let _ = join.join();
+                if join.join().is_err() {
+                    error!("[recorder] worker panicked during controller drop");
+                }
             }
         }
     }
@@ -215,7 +225,9 @@ pub fn start_recording(
         if let Some(mut task) = failed_task {
             task.control.take();
             if let Some(join) = task.join.take() {
-                let _ = join.join();
+                if join.join().is_err() {
+                    error!("[recorder] failed-start worker panicked");
+                }
             }
         }
         return Err("recording thread failed before startup".to_string());
@@ -270,14 +282,15 @@ fn run_recording_thread(
         Err(e) => {
             error!("[recorder] build stream failed: {}", e);
             finish_idle(&app, &state, &handle, token);
-            let _ = app.emit("recording_error", serde_json::json!({ "error": e }));
+            emit_recorder_event(&app, "recording_error", serde_json::json!({ "error": e }));
             return;
         }
     };
     if let Err(e) = stream.play() {
         error!("[recorder] stream.play failed: {}", e);
         finish_idle(&app, &state, &handle, token);
-        let _ = app.emit(
+        emit_recorder_event(
+            &app,
             "recording_error",
             serde_json::json!({ "error": format!("play: {}", e) }),
         );
@@ -296,13 +309,24 @@ fn run_recording_thread(
             }
             Err(RecvTimeoutError::Timeout) => {
                 // 推送波形幅度 + 检查是否到达时长上限
-                let (peak, len) = {
-                    match buf.lock() {
-                        Ok(b) => (b.latest_peak, b.samples.len()),
-                        Err(_) => (0.0, 0),
+                let (peak, len) = match buf.lock() {
+                    Ok(buffer) => (buffer.latest_peak, buffer.samples.len()),
+                    Err(error) => {
+                        error!("[recorder] sample buffer poisoned: {error}");
+                        emit_recorder_event(
+                            &app,
+                            "recording_error",
+                            serde_json::json!({ "error": "sample_buffer_unavailable" }),
+                        );
+                        cancelled = true;
+                        break;
                     }
                 };
-                let _ = app.emit("recording_amplitude", serde_json::json!({ "level": peak }));
+                emit_recorder_event(
+                    &app,
+                    "recording_amplitude",
+                    serde_json::json!({ "level": peak }),
+                );
                 if len >= max_samples {
                     info!("[recorder] reached max duration, auto-stop");
                     break;
@@ -317,11 +341,20 @@ fn run_recording_thread(
 
     // 取出缓冲（截断到上限）
     let samples: Vec<i16> = match buf.lock() {
-        Ok(mut b) => {
-            b.samples.truncate(max_samples);
-            std::mem::take(&mut b.samples)
+        Ok(mut buffer) => {
+            buffer.samples.truncate(max_samples);
+            std::mem::take(&mut buffer.samples)
         }
-        Err(_) => Vec::new(),
+        Err(error) => {
+            error!("[recorder] failed to take sample buffer: {error}");
+            emit_recorder_event(
+                &app,
+                "recording_error",
+                serde_json::json!({ "error": "sample_buffer_unavailable" }),
+            );
+            finish_idle(&app, &state, &handle, token);
+            return;
+        }
     };
     let duration_ms = if sample_rate > 0 {
         (samples.len() as u64 * 1000 / sample_rate as u64) as u32
@@ -331,7 +364,8 @@ fn run_recording_thread(
 
     if cancelled {
         info!("[recorder] cancelled, no buffer retained");
-        let _ = app.emit(
+        emit_recorder_event(
+            &app,
             "recording_finished",
             serde_json::json!({ "target": target, "cancelled": true, "durationMs": duration_ms }),
         );
@@ -348,15 +382,32 @@ fn run_recording_thread(
         samples_base64.len()
     );
 
-    // 存到 AppState.recording_buffer 供 save_trimmed 命令读取
-    if let Ok(s) = state.lock() {
-        if let Ok(mut buf) = s.recording_buffer.lock() {
-            *buf = Some((samples, sample_rate));
-        }
+    // 存到 AppState.recording_buffer 供 save_trimmed 命令读取。
+    let store_result = (|| {
+        let app_state = state
+            .lock()
+            .map_err(|error| format!("lock state after recording: {error}"))?;
+        let mut recording_buffer = app_state
+            .recording_buffer
+            .lock()
+            .map_err(|error| format!("lock recording buffer: {error}"))?;
+        *recording_buffer = Some((samples, sample_rate));
+        Ok::<(), String>(())
+    })();
+    if let Err(error) = store_result {
+        error!("[recorder] failed to publish recording buffer: {error}");
+        emit_recorder_event(
+            &app,
+            "recording_error",
+            serde_json::json!({ "error": "recording_buffer_unavailable" }),
+        );
+        finish_idle(&app, &state, &handle, token);
+        return;
     }
 
     // 推送完整数据到前端进入剪裁态。
-    let _ = app.emit(
+    emit_recorder_event(
+        &app,
         "recording_finished",
         serde_json::json!({
             "target": target,
@@ -435,7 +486,14 @@ pub fn save_trimmed_audio(
     let temporary = write_wav_candidate(trimmed, sample_rate)?;
     let commit_result = crate::sound::commit_wav(file_name, &temporary, &final_path);
     if commit_result.is_err() {
-        let _ = std::fs::remove_file(&temporary);
+        match std::fs::remove_file(&temporary) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => log::warn!(
+                "[recorder] failed to remove rejected WAV {}: {error}",
+                temporary.display()
+            ),
+        }
     }
     commit_result?;
     info!(
@@ -443,12 +501,15 @@ pub fn save_trimmed_audio(
         final_path.display()
     );
 
-    // 清空缓冲
-    if let Ok(s) = state.lock() {
-        if let Ok(mut buf) = s.recording_buffer.lock() {
-            *buf = None;
-        }
-    }
+    // 清空已提交的录音缓冲；失败时不能伪装为完整成功。
+    let app_state = state
+        .lock()
+        .map_err(|error| format!("lock state after audio save: {error}"))?;
+    let mut recording_buffer = app_state
+        .recording_buffer
+        .lock()
+        .map_err(|error| format!("lock recording buffer after save: {error}"))?;
+    *recording_buffer = None;
 
     Ok(())
 }
@@ -477,9 +538,13 @@ fn finish_idle(
     drop(lease);
     let new_status = match state.lock() {
         Ok(state) => state.runtime_status(),
-        Err(_) => RuntimeStatus::Idle,
+        Err(error) => {
+            error!("[recorder] failed to derive status after finish: {error}");
+            return;
+        }
     };
-    let _ = app.emit(
+    emit_recorder_event(
+        app,
         "runtime_status_changed",
         serde_json::json!({ "status": new_status }),
     );
@@ -592,7 +657,14 @@ fn write_wav_candidate(samples: &[i16], sample_rate: u32) -> Result<std::path::P
     })();
 
     if result.is_err() {
-        let _ = std::fs::remove_file(&temporary);
+        match std::fs::remove_file(&temporary) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => log::warn!(
+                "[recorder] failed to remove invalid WAV candidate {}: {error}",
+                temporary.display()
+            ),
+        }
     }
     result
 }
