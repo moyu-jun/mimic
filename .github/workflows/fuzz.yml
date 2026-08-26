@@ -19,7 +19,7 @@ jobs:
         run: rustup default stable
       - name: Run bounded parser fuzzing
         shell: pwsh
-        run: .scriptsun-fuzz.ps1 -Iterations 2000000
+        run: .\scripts\run-fuzz.ps1 -Iterations 2000000
       - name: Upload crash artifacts
         if: failure()
         uses: actions/upload-artifact@v4
