@@ -7,6 +7,7 @@ use crate::simulation::action::ActionSequence;
 use crate::simulation::driver::InputDriver;
 use crate::simulation::event::{MouseButton, SimulationEvent};
 use std::fmt;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
 use std::sync::{Arc, Mutex, RwLock};
 use std::thread::{self, JoinHandle};
@@ -118,17 +119,20 @@ struct RuntimeInner {
     command_tx: SyncSender<RuntimeCommand>,
     snapshot: Arc<RwLock<RuntimeSnapshot>>,
     join: Mutex<Option<JoinHandle<()>>>,
+    closed: AtomicBool,
 }
 
 impl Drop for RuntimeInner {
     fn drop(&mut self) {
-        let (reply_tx, reply_rx) = mpsc::sync_channel(1);
-        if self
-            .command_tx
-            .send(RuntimeCommand::Shutdown { reply: reply_tx })
-            .is_ok()
-        {
-            let _ = reply_rx.recv_timeout(SHUTDOWN_TIMEOUT);
+        if !self.closed.swap(true, Ordering::AcqRel) {
+            let (reply_tx, reply_rx) = mpsc::sync_channel(1);
+            if self
+                .command_tx
+                .send(RuntimeCommand::Shutdown { reply: reply_tx })
+                .is_ok()
+            {
+                let _ = reply_rx.recv_timeout(SHUTDOWN_TIMEOUT);
+            }
         }
         if let Ok(join) = self.join.get_mut() {
             if let Some(join) = join.take() {
@@ -173,6 +177,7 @@ impl RuntimeHandle {
                     command_tx,
                     snapshot,
                     join: Mutex::new(Some(join)),
+                    closed: AtomicBool::new(false),
                 }),
             }),
             Ok(Err(error)) => {
@@ -188,6 +193,9 @@ impl RuntimeHandle {
         sequence: ActionSequence,
         mode: RuntimeMode,
     ) -> Result<RunId, RuntimeError> {
+        if self.inner.closed.load(Ordering::Acquire) {
+            return Err(RuntimeError::Unavailable);
+        }
         let (reply_tx, reply_rx) = mpsc::sync_channel(1);
         self.inner
             .command_tx
@@ -203,6 +211,9 @@ impl RuntimeHandle {
     }
 
     pub fn stop(&self) -> Result<StopOutcome, RuntimeError> {
+        if self.inner.closed.load(Ordering::Acquire) {
+            return Err(RuntimeError::Unavailable);
+        }
         let (reply_tx, reply_rx) = mpsc::sync_channel(1);
         self.inner
             .command_tx
@@ -214,6 +225,9 @@ impl RuntimeHandle {
     }
 
     pub fn shutdown(&self) -> Result<(), RuntimeError> {
+        if self.inner.closed.swap(true, Ordering::AcqRel) {
+            return Ok(());
+        }
         let (reply_tx, reply_rx) = mpsc::sync_channel(1);
         self.inner
             .command_tx

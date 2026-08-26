@@ -2101,6 +2101,7 @@ dependencies = [
  "hound",
  "interception",
  "log",
+ "mimic-elevation-protocol",
  "rust-ini",
  "serde",
  "serde_json",
@@ -2110,6 +2111,19 @@ dependencies = [
  "tauri-plugin-log",
  "windows-sys 0.59.0",
 ]
+
+[[package]]
+name = "mimic-elevated-helper"
+version = "0.1.0"
+dependencies = [
+ "mimic-elevation-protocol",
+ "sha2",
+ "windows-sys 0.59.0",
+]
+
+[[package]]
+name = "mimic-elevation-protocol"
+version = "0.1.0"
 
 [[package]]
 name = "minimal-lexical"

@@ -46,7 +46,7 @@ state.rs | error.rs | paths.rs | sound.rs | driver.rs
 ```text
 src-tauri/src/
 ├── lib.rs                 # 依赖装配、启动健康状态、事件适配、退出治理
-├── main.rs                # 受限提权模式前置分流；普通路径启动 Tauri
+├── main.rs                # 普通权限 Tauri 入口
 ├── commands/
 │   ├── config_cmd.rs      # 配置事务和日志等级
 │   ├── runtime_cmd.rs     # 导航、状态查询和安全停止
@@ -75,7 +75,7 @@ src-tauri/src/
 ├── mouse_picker.rs        # token 化拾取会话与超时服务
 ├── sound_recorder.rs      # token 化录音任务与 WAV 候选发布
 ├── sound.rs               # WAV 解析、内存缓存、waveOut 预热与播放
-└── driver.rs              # 驱动检测、完整性校验和受限提权维护
+└── driver.rs              # 驱动检测、helper 完整性校验和提权客户端
 ```
 
 ## 4. 状态模型
@@ -193,17 +193,19 @@ recovery   criticalRuntime | localOperation | optionalAudio
 
 ## 10. 权限与便携数据
 
-普通 Tauri/WebView 进程不整体提权。安装、卸载或重启由用户操作触发，当前可执行文件在 Tauri 初始化前进入受限 elevated 模式：
+普通 Tauri/WebView 进程不整体提权。安装、卸载或重启由用户操作触发，并只启动独立的 `mimic-elevated-helper.exe`：
 
+- helper 是独立 workspace crate，不链接 Tauri/WebView，也不加载网页或通用脚本；
 - 协议固定为 v1，仅允许 install、uninstall、reboot；
 - 参数数量、PID 和 128-bit CSPRNG nonce 严格校验；
-- helper 校验父进程映像必须为同一 Mimic 可执行文件；
+- helper 校验调用进程映像必须是同一发布目录中的 `mimic.exe`；
 - 一次性请求在 `data/temp` 中使用 create-new 创建并通过原子 rename 消费；
 - 不接受任意命令、任意路径或附加参数；
-- 安装器在 UAC 前和 elevated 分支内各校验一次固化 SHA-256；
-- 重启只执行 System32 下的 `shutdown.exe` 和固定参数。
+- 主程序在 UAC 前校验 build-time 固化的 helper SHA-256，helper 执行动作前再校验安装器固化 SHA-256；
+- helper 拒绝关键目录/文件的 Windows 重解析点，重启只执行 System32 下的 `shutdown.exe` 和固定参数；
+- 发布脚本先构建（可选签名）helper，再把其最终 SHA-256 嵌入主程序，最后验证打包副本哈希一致。
 
-这是独立签名 helper 可用前的受限执行模式。正式发布仍需把高权限代码迁移到独立、最小化并签名的 helper，验证应用/helper/安装器签名链。
+正式生产发布仍必须提供 Authenticode 证书，对应用、helper 和安装器完成签名及证书生命周期治理；没有证书的本地构建仅证明强哈希闭环，不等同于签名发布验收。
 
 可写数据固定在：
 
@@ -231,6 +233,6 @@ data/
 
 ## 12. 验证边界
 
-自动测试覆盖 Runtime 并发/停止、活动不变式、配置事务与边界、INI/WAV 任意输入、热键去抖、拾取 token、错误分类和提权协议解析。
+自动测试覆盖 Runtime 并发/停止、活动不变式、配置事务与边界、INI/WAV 任意输入、热键去抖、拾取 token、错误分类和提权协议解析；发布脚本额外校验独立 helper 的参数失败关闭、嵌入哈希和打包副本一致性。
 
 下列内容必须在 Windows 真机发布环境完成：真实键鼠与 Interception 行为、UAC 取消和驱动安装/卸载/重启、麦克风设备异常、waveOut 延迟、停止延迟 P95、Authenticode 签名和打包产物签名链。

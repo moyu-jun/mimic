@@ -1,16 +1,16 @@
 # Mimic Rust 重构实施报告
 
 > 更新日期：2026-08-26
-> 当前状态：代码级核心重构已完成；独立签名 helper、Windows 真机与发布签名门禁未完成
+> 当前状态：代码级核心重构和独立最小 helper 已完成；Windows 真机与 Authenticode 签名门禁未完成
 > 对应方案：[RUST_ARCHITECTURE_REFACTOR_PLAN.md](./RUST_ARCHITECTURE_REFACTOR_PLAN.md)
 
 ## 1. 实施结论
 
-本轮已经完成 Runtime Actor、类型化状态、活动 RAII、稳定命令错误 DTO、配置与音频双侧事务、会话 token、便携目录隔离、链接/重解析点防护、前端写入回滚、后台音频预热和受限提权协议。
+本轮已经完成 Runtime Actor、类型化状态、活动 RAII、稳定命令错误 DTO、配置与音频双侧事务、会话 token、便携目录隔离、链接/重解析点防护、前端写入回滚、后台音频预热、独立最小提权 helper 和哈希固定发布链。
 
 旧共享停止标志、跨运行公共事件队列、`simulation_worker` 和 executor/scheduler 已删除。输入运行链路由单线程 Actor 独占驱动、计时、游标和按下账本。Stop 成功返回时旧运行已经终止且输入账本已释放；释放失败进入明确错误态。
 
-当前自动化基线为 46 项 Rust 单元/有界属性测试全部通过，前端生产构建通过。最终门禁结果见第 4 节；真实驱动、UAC、麦克风、音频设备和延迟数据仍不得用自动测试替代。
+当前自动化基线为 49 项 Rust 单元/有界属性测试全部通过，前端生产构建和完整 release 发布链通过。最终门禁结果见第 4 节；真实驱动、UAC、麦克风、音频设备和延迟数据仍不得用自动测试替代。
 
 ## 2. 已完成改造
 
@@ -30,6 +30,7 @@
 - `ActivityLease` 为配置、热键、录音启动和驱动维护提供 Drop 自动释放。
 - Runtime、录音和拾取使用各自 token/确认协议，陈旧任务不能释放新活动。
 - Runtime、监听器、拾取超时、录音和音频预热均有可回收 Handle/Join。
+- Shutdown 在发送控制消息前原子封闭 Runtime，确认返回后 Start/Stop 不再进入关闭中的通道。
 
 ### 2.3 配置事务与界面回滚
 
@@ -70,12 +71,13 @@
 
 ### 2.7 最小权限与路径安全
 
-- 普通 Tauri/WebView 不整体提权。
-- 当前应用在 Tauri 初始化前提供受限 elevated 执行模式，仅允许 install、uninstall、reboot。
-- v1 协议校验固定参数、父 PID、同一可执行文件调用者和 128-bit CSPRNG nonce。
+- 普通 Tauri/WebView 不整体提权，高权限动作迁入独立 `mimic-elevated-helper.exe`。
+- helper 不链接 Tauri/WebView，发布体积 265,216 bytes，只允许 install、uninstall、reboot。
+- v1 协议校验固定参数、调用 PID、同发布目录 `mimic.exe` 调用者和 128-bit CSPRNG nonce。
 - 一次性请求使用 `data/temp` 文件的 create-new + 原子 claim/consume。
-- 安装器在提权前及 elevated 分支内重复验证固化 SHA-256。
-- 系统重启使用 System32 绝对路径和固定参数，不经过 shell。
+- 主程序在 UAC 前验证 build-time 固化的 helper SHA-256；helper 执行动作前验证安装器固化 SHA-256。
+- helper 拒绝关键资源重解析点；系统重启使用 System32 绝对路径和固定参数，不经过 shell。
+- 发布脚本按“helper 构建/可选签名 → 固化最终哈希 → 主程序构建/可选签名 → 打包副本复核”执行。
 - `PortablePaths` 规范化当前可执行文件路径；数据目录和固定文件拒绝符号链接/Windows 重解析点。
 - CSP、capabilities 和构建资源检查已收紧。
 
@@ -85,13 +87,14 @@
 - 512 组确定性任意 INI 文本不得 panic。
 - 256 组、每组 256 步的活动获取/释放序列保持单所有者不变式。
 - 提权协议拒绝未知动作、错误版本、零/非法 PID、非法 nonce 和额外参数。
+- 固化哈希测试以真实临时文件证明：内容被篡改后，helper/安装器共用的校验函数失败关闭。
 - 命令 DTO 测试证明内部 Windows 路径不会返回前端。
 
 ## 3. 与原方案的实现差异
 
-原方案要求独立、最小化、签名的 `mimic-elevated-helper.exe`。当前代码先采用同一应用可执行文件的受限 elevated 模式，并在 Tauri/WebView 初始化前退出；它已经缩小运行路径并完成协议白名单、nonce、调用者校验和安装器哈希，但不等价于独立签名 helper。
+独立、最小化的 `mimic-elevated-helper.exe` 已按方案落地，主程序不再包含 elevated 分流或直接执行安装器的路径。当前实现以编译期固化 SHA-256 完成应用 → helper → 安装器的完整性闭环，并在提供证书指纹时由发布脚本调用 `signtool` 后再固化最终文件哈希。
 
-保留该差异的原因是当前工作区没有正式 Authenticode 证书、发布主体和证书保管/轮换流程。生产发布前必须迁移到独立 helper 或完成等价的签名隔离评审，不能将当前状态标记为发布安全验收完成。
+当前工作区没有正式 Authenticode 证书、发布主体及证书保管/轮换流程，因此本地发布产物仍是“哈希固定但未签名”。这不阻塞代码结构完成，但生产签名验收仍保持未完成状态。
 
 ## 4. 自动化门禁
 
@@ -100,25 +103,24 @@
 | `cargo fmt --check` | 通过 |
 | `cargo check --all-targets --all-features` | 通过 |
 | `cargo clippy --all-targets --all-features -- -D warnings` | 通过，零警告 |
-| `cargo test --all-targets` | 通过，46 passed / 0 failed |
+| `cargo test --workspace --all-targets` | 通过，49 passed / 0 failed |
 | `npm run build` | 通过，61 modules |
-| `cargo build --release` | 通过；关键资源和安装器固化哈希校验通过 |
+| `scripts/build-release.ps1` | 通过；主程序、helper、资源和打包副本哈希闭环通过 |
 | `git diff --check` | 通过；仅 CRLF 转换提示 |
-| Release helper 失败关闭 | 旧协议退出 64；伪造 v1 请求退出 70；均未进入 Tauri/UAC/维护动作 |
-| CodeGraph | 已同步，65 files / 1,047 nodes / 2,738 edges |
+| Release helper 失败关闭 | 空参数和未知操作均退出 64，未进入 UAC 或维护动作；helper/打包副本 SHA-256 一致 |
+| CodeGraph | 已同步，67 files / 1,079 nodes / 2,861 edges |
 
 ## 5. 剩余发布门禁
 
-1. **独立签名 helper**：拆出最小 helper，主程序验证 helper 签名或固化强哈希；helper 验证安装器发布方签名和固化哈希。
-2. **Authenticode 发布链**：签名应用、helper 和安装器，定义证书保管、轮换、吊销和 CI 签名流程。
-3. **Windows 真机矩阵**：验证真实键鼠、Interception、同键启停、透传、UAC 取消/失败、安装/卸载/重启、麦克风占用/拒绝、音频设备缺失和播放延迟。
-4. **性能门禁**：测量 Stop P95 ≤ 100ms、最坏 ≤ 250ms；音频首播延迟由用户实测验收。
-5. **故障注入扩展**：配置写盘已有注入测试；仍需 Windows 文件占用、磁盘满、音频设备断开和前端 E2E 回滚场景。
-6. **持续 fuzz**：CI 已有确定性有界属性测试，但尚未建立 cargo-fuzz 语料库、定时任务和崩溃样本归档。
+1. **Authenticode 发布链**：签名应用、helper 和安装器，定义证书保管、轮换、吊销和 CI 签名流程。
+2. **Windows 真机矩阵**：验证真实键鼠、Interception、同键启停、透传、UAC 取消/失败、安装/卸载/重启、麦克风占用/拒绝、音频设备缺失和播放延迟。
+3. **性能门禁**：测量 Stop P95 ≤ 100ms、最坏 ≤ 250ms；音频首播延迟由用户实测验收。
+4. **故障注入扩展**：配置写盘已有注入测试；仍需 Windows 文件占用、磁盘满、音频设备断开和前端 E2E 回滚场景。
+5. **持续 fuzz**：CI 已有确定性有界属性测试，但尚未建立 cargo-fuzz 语料库、定时任务和崩溃样本归档。
 
 ## 6. 下一步顺序
 
-1. 先完成最终静态/Release 门禁并冻结候选构建。
-2. 在有证书的发布环境拆分和签名独立 helper。
+1. 建立持续 fuzz 与故障注入回归，冻结候选构建。
+2. 在有证书的发布环境签名应用、helper 和安装器并验证发布方。
 3. 执行 Windows 真机与性能矩阵，记录设备、系统版本、驱动版本和结果。
 4. 将通过的签名、真机和性能证据回填本报告后，才能关闭 Phase 6～7。

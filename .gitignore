@@ -22,3 +22,5 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+# Generated elevated helper staging asset
+/extra/driver/mimic-elevated-helper.exe

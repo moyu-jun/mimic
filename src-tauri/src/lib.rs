@@ -35,16 +35,9 @@ use commands::runtime_cmd::*;
 use commands::sound_cmd::*;
 use commands::system_cmd::*;
 
-/// Restricted elevated execution mode. The helper path never initializes Tauri or the UI.
-pub fn elevated_helper_exit_code() -> Option<i32> {
-    driver::elevated_helper_exit_code()
-}
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    // ADMIN_POLICY（2026-06-10 调整）：启动时不再主动请求 UAC 提权。
-    // 应用普通权限即可运行：加载驱动、热键监听、按键/鼠标模拟均不需要管理员。
-    // 仅「安装驱动」需要管理员，由 install_interception_driver 命令的权限守卫拦截，
-    // 用户在首页看到 permission_denied 提示后，点击「以管理员身份重启」按钮触发 UAC。
+    // 主 Tauri/WebView 进程始终保持普通权限。驱动维护和重启由独立 helper 按需请求 UAC。
 
     // DLL 加载策略（2026-06-12 调整）：
     // interception.dll 现在通过 build.rs 自动复制到 exe 同级目录，

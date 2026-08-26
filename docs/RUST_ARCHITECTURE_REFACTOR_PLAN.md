@@ -532,7 +532,7 @@ RuntimeDomainEvent -> FrontendEventDto -> app.emit(...)
               +--> uninstall driver
               +--> reboot system
 
-实施状态（2026-08-26）：普通主进程已不整体提权；当前先以同一应用可执行文件的受限 elevated 模式落地，且在 Tauri/WebView 初始化前分流退出。v1 固定协议、操作白名单、父进程映像校验、128-bit CSPRNG nonce、一次性请求消费和安装器双重 SHA-256 校验均已实现。该过渡实现不等价于独立签名 helper，因此独立 helper 与 Authenticode 签名链仍属于发布门禁。
+实施状态（2026-08-26）：普通主进程不整体提权；独立 `mimic-elevated-helper.exe` 已从主程序拆出，不链接 Tauri/WebView。v1 固定协议、操作白名单、调用进程映像校验、128-bit CSPRNG nonce、一次性请求消费、关键路径重解析点拒绝，以及应用 → helper → 安装器的编译期 SHA-256 闭环均已实现。发布脚本支持在固化哈希前签名 helper，并在最后签名主程序；由于当前未提供正式证书，Authenticode 仍属于外部发布门禁。
 
 要求：
 
@@ -540,7 +540,7 @@ RuntimeDomainEvent -> FrontendEventDto -> app.emit(...)
 - 只有用户点击并确认具体高权限操作后才启动 helper；启动应用、检测驱动和普通模拟不得触发 UAC。
 - helper 不加载网页、不解析通用脚本，不接受任意命令、任意可执行路径或任意附加参数。
 - 请求协议使用固定 schema、版本、操作白名单、长度限制、nonce 和调用方身份校验；每个请求只表达一个预定义操作。
-- 主程序在启动 helper 前验证其发布方签名；helper 在执行驱动安装器前验证发布方签名和编译期固化的 SHA-256。
+- 主程序在启动 helper 前验证构建时固化的 SHA-256；helper 在执行驱动安装器前验证编译期固化的 SHA-256。正式生产发布还必须对主程序、helper 和安装器做 Authenticode 签名及发布方验证。
 - helper 使用绝对路径访问固定 driver 目录，返回结构化结果后立即退出，不作为常驻高权限服务。
 - 用户拒绝 UAC、签名/哈希失败或协议非法时返回可恢复错误，不改变原驱动状态，也不影响普通功能。
 
@@ -949,8 +949,8 @@ npm run build
 ### 安全
 
 - [x] 主应用默认普通权限。
-- [ ] 高权限操作位于最小 helper 且协议白名单化。
-- [ ] portable data 与可执行资源逻辑隔离，每次提权前验证 helper/安装器签名或固化哈希。
+- [x] 高权限操作位于最小 helper 且协议白名单化。
+- [x] portable data 与可执行资源逻辑隔离，每次提权前验证 helper/安装器签名或固化哈希。
 - [x] 路径、长度、次数、时长和文件大小均有上限。
 - [x] CSP/capabilities/opener 按最小权限配置。
 - [ ] unsafe 块最小化并有 Safety 说明。

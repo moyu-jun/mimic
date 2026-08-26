@@ -5,6 +5,10 @@ description = "A Tauri App"
 authors = ["you"]
 edition = "2021"
 
+[workspace]
+members = ["crates/elevation-protocol", "crates/elevated-helper"]
+resolver = "2"
+
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [lib]
@@ -26,6 +30,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 ini = { package = "rust-ini", version = "0.21" }
 interception = "0.1"
+mimic-elevation-protocol = { path = "crates/elevation-protocol" }
 
 # 阶段 18：提示音录制 — cpal 采集麦克风，hound 写 WAV
 cpal = "0.15"
@@ -50,4 +55,3 @@ windows-sys = { version = "0.59", features = [
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
 ] }
-
