@@ -1,8 +1,8 @@
 # Mimic Rust 后端架构重构计划与实施方案
 
-> 状态：待实施
-> 版本：v1.1
-> 日期：2026-08-25
+> 状态：核心架构重构已实施，发布安全验收待完成
+> 版本：v1.2
+> 日期：2026-08-26
 > 范围：`src-tauri` Rust 后端、Tauri 命令边界及相关构建/安全配置
 > 依据：当前仓库代码审查、Rust 架构审查与安全/可靠性问题清单
 
@@ -532,6 +532,8 @@ RuntimeDomainEvent -> FrontendEventDto -> app.emit(...)
               +--> uninstall driver
               +--> reboot system
 
+实施状态（2026-08-26）：普通主进程已不整体提权；当前先以同一应用可执行文件的受限 elevated 模式落地，且在 Tauri/WebView 初始化前分流退出。v1 固定协议、操作白名单、父进程映像校验、128-bit CSPRNG nonce、一次性请求消费和安装器双重 SHA-256 校验均已实现。该过渡实现不等价于独立签名 helper，因此独立 helper 与 Authenticode 签名链仍属于发布门禁。
+
 要求：
 
 - 主 Tauri/WebView 进程始终默认以普通用户运行，不提供整体提权重启入口。
@@ -928,39 +930,39 @@ npm run build
 
 ### 架构
 
-- [ ] 模拟任务、驱动、计时和按下账本由单个 Actor 所有。
-- [ ] 不存在共享 stop flag、跨 run 公共事件积压和游离模拟线程。
-- [ ] 核心 Runtime 不依赖 Tauri。
+- [x] 模拟任务、驱动、计时和按下账本由单个 Actor 所有。
+- [x] 不存在共享 stop flag、跨 run 公共事件积压和游离模拟线程。
+- [x] 核心 Runtime 不依赖 Tauri。
 - [ ] 每个后台线程都有 Handle、Shutdown 和 Join。
-- [ ] AppState 不再保存线程亲和上下文。
+- [x] AppState 不再保存线程亲和上下文。
 - [ ] Navigation、Activity、SimulationMode、RuntimeHealth 和 ErrorRecoveryPolicy 是状态及错误终态的唯一事实来源。
 
 ### 正确性
 
-- [ ] Stop 成功返回时输入全部释放。
-- [ ] 快速重启不会执行旧任务事件。
+- [x] Stop 成功返回时输入全部释放。
+- [x] 快速重启不会执行旧任务事件。
 - [ ] Delay 可中断，停止延迟 P95 不超过 100ms、最坏不超过 250ms。
-- [ ] 配置内存值与落盘值一致。
-- [ ] 录音、拾取和运行时 session 不会相互串台。
+- [x] 配置内存值与落盘值一致。
+- [x] 录音、拾取和运行时 session 不会相互串台。
 - [ ] 所有 FFI/send/文件解析错误均被处理。
 
 ### 安全
 
-- [ ] 主应用默认普通权限。
+- [x] 主应用默认普通权限。
 - [ ] 高权限操作位于最小 helper 且协议白名单化。
 - [ ] portable data 与可执行资源逻辑隔离，每次提权前验证 helper/安装器签名或固化哈希。
-- [ ] 路径、长度、次数、时长和文件大小均有上限。
-- [ ] CSP/capabilities/opener 按最小权限配置。
+- [x] 路径、长度、次数、时长和文件大小均有上限。
+- [x] CSP/capabilities/opener 按最小权限配置。
 - [ ] unsafe 块最小化并有 Safety 说明。
 
 ### 验证
 
-- [ ] fmt、clippy、test、check、前端 build 全通过。
-- [ ] Runtime 生命周期并发测试通过。
-- [ ] WAV/config fuzz 或 property tests 通过。
+- [x] fmt、clippy、test、check、前端 build 全通过。
+- [x] Runtime 生命周期并发测试通过。
+- [x] WAV/config fuzz 或 property tests 通过。
 - [ ] Windows 手工矩阵通过。
 - [ ] 发布构建、签名和资源校验通过。
-- [ ] 架构、错误码、线程所有权和运维文档已更新。
+- [x] 架构、错误码、线程所有权和运维文档已更新。
 
 ## 17. 风险登记表
 

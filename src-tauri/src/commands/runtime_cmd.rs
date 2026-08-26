@@ -1,209 +1,109 @@
-// 运行时状态与控制命令 — ARCHITECTURE v3.0 阶段 A
+//! 运行时与导航命令适配层。
 
 use crate::config;
+use crate::error::{CommandError, CommandResult};
 use crate::hotkeys::HotkeyUpdateResult;
-use crate::state::{RuntimeStatus, SharedState};
+use crate::runtime::RuntimePhase;
+use crate::state::{Activity, PageId, RuntimeStatus, SharedState};
 use tauri::Emitter;
 
-/// 设置当前页面 — 阶段 12 / P2-3 修复
-///
-/// 后端记录当前页面，用于判断热键是否可触发（REQUIREMENTS 3.6）。
-/// P2-3 修复: Idle 状态下切到 keyboard/mouse 页时自动切换到对应 Ready 状态。
 #[tauri::command]
 pub fn set_current_page(
     page: String,
     state: tauri::State<SharedState>,
     app: tauri::AppHandle,
-) -> Result<(), String> {
-    // 运行态守卫 — DESIGN 6.1
-    {
-        let app_state = state
-            .inner()
-            .lock()
-            .map_err(|e| format!("Failed to lock state: {}", e))?;
-        match app_state.runtime_status {
-            RuntimeStatus::RunningKeyboard
-            | RuntimeStatus::RunningMouse
-            | RuntimeStatus::RunningCustom
-            | RuntimeStatus::PickingMouse
-            | RuntimeStatus::Recording => {
-                return Err("busy: simulation running".to_string());
-            }
-            _ => {}
-        }
-    }
-
-    let new_status = {
+) -> CommandResult<()> {
+    let page_id = PageId::try_from(page.as_str())?;
+    let status = {
         let mut app_state = state
             .inner()
             .lock()
-            .map_err(|e| format!("Failed to lock state: {}", e))?;
-        app_state.current_page = page.clone();
-
-        // 切页即离开任何自定义序列详情页 → 清空激活序列（列表页/其它页热键无效）。
-        app_state.active_custom_sequence_id = None;
-
-        // P2-3: 非 Running*/PickingMouse 状态下根据页面切换到对应 Ready 状态
-        // 修复: Ready 状态间也需要切换 (ReadyKeyboard ↔ ReadyMouse)
-        // custom 页为卡片列表 → 归入 Idle（详情页的 ReadyCustom 由 enter_custom_sequence 设置）。
-        match app_state.runtime_status {
-            RuntimeStatus::Idle
-            | RuntimeStatus::ReadyKeyboard
-            | RuntimeStatus::ReadyMouse
-            | RuntimeStatus::ReadyCustom => {
-                app_state.runtime_status = match page.as_str() {
-                    "keyboard" => RuntimeStatus::ReadyKeyboard,
-                    "mouse" => RuntimeStatus::ReadyMouse,
-                    _ => RuntimeStatus::Idle,
-                };
-            }
-            _ => {
-                // Running*/PickingMouse/Error 状态不变
-            }
+            .map_err(|error| CommandError::from(format!("Failed to lock state: {error}")))?;
+        if app_state.activity != Activity::Idle {
+            return Err(format!("busy: {:?} is active", app_state.activity).into());
         }
-
-        log::info!(
-            "[set_current_page] page={}, status={:?}",
-            page,
-            app_state.runtime_status
-        );
-        app_state.runtime_status.clone()
+        app_state.navigation = page_id;
+        app_state.active_custom_sequence_id = None;
+        let status = app_state.runtime_status();
+        log::info!("[navigation] page={:?}, status={:?}", page_id, status);
+        status
     };
-
-    // 发送 runtime_status_changed 事件
-    if let Err(e) = app.emit(
-        "runtime_status_changed",
-        serde_json::json!({ "status": new_status }),
-    ) {
-        log::error!("[set_current_page] failed to emit event: {}", e);
-    }
-
+    emit_status(&app, status);
     Ok(())
 }
 
-/// 更新热键配置 — 阶段 13 / DESIGN 6.2
-///
-/// 流程：对比变化 → 持久化 → 更新内存。
-/// Interception 热键由后台监听线程统一处理，不需要注册/注销。
-/// 返回结构化结果供前端分别提示持久化成功/失败。
 #[tauri::command]
 pub fn update_hotkeys(
     hotkeys: config::HotkeyConfig,
     state: tauri::State<SharedState>,
-) -> Result<HotkeyUpdateResult, String> {
-    // 运行态守卫 — DESIGN 6.1
-    {
-        let app_state = state
-            .inner()
-            .lock()
-            .map_err(|e| format!("Failed to lock state: {}", e))?;
-        match app_state.runtime_status {
-            RuntimeStatus::RunningKeyboard
-            | RuntimeStatus::RunningMouse
-            | RuntimeStatus::PickingMouse
-            | RuntimeStatus::Recording => {
-                return Err("busy: simulation running".to_string());
-            }
-            _ => {}
-        }
-    }
-
-    crate::hotkeys::update_hotkeys(&state, hotkeys)
+) -> CommandResult<HotkeyUpdateResult> {
+    crate::hotkeys::update_hotkeys(&state, hotkeys).map_err(CommandError::from)
 }
 
-/// 停止模拟 — 阶段 12（仅切换状态）
-///
-/// 当前阶段仅将状态从 Running* 切回 Idle,不涉及真实 worker 停止（阶段 13 接入）。
 #[tauri::command]
 pub fn stop_simulation(
     state: tauri::State<SharedState>,
     app: tauri::AppHandle,
-) -> Result<(), String> {
-    let new_status = {
-        let mut app_state = state
-            .inner()
-            .lock()
-            .map_err(|e| format!("Failed to lock state: {}", e))?;
-
-        match app_state.runtime_status {
-            RuntimeStatus::RunningKeyboard | RuntimeStatus::RunningMouse => {
-                app_state.runtime_status = RuntimeStatus::Idle;
-                RuntimeStatus::Idle
-            }
-            // 自定义序列停止后回到详情页的 ReadyCustom（激活序列仍保留，可再次启动）。
-            RuntimeStatus::RunningCustom => {
-                app_state.runtime_status = RuntimeStatus::ReadyCustom;
-                RuntimeStatus::ReadyCustom
-            }
-            _ => {
-                return Err("Not running".to_string());
-            }
-        }
-    };
-
-    // 发送 runtime_status_changed 事件
-    if let Err(e) = app.emit(
-        "runtime_status_changed",
-        serde_json::json!({ "status": new_status }),
-    ) {
-        log::error!("[stop_simulation] failed to emit event: {}", e);
+) -> CommandResult<()> {
+    match crate::runner::SimulationRunner::stop(&app, state.inner())? {
+        crate::runtime::StopOutcome::Stopped => Ok(()),
+        crate::runtime::StopOutcome::AlreadyIdle => Err("not_running".into()),
     }
-
-    log::info!("[stop_simulation] simulation stopped");
-    Ok(())
 }
 
-/// 获取当前运行状态 — 阶段 12
 #[tauri::command]
-pub fn get_runtime_status(state: tauri::State<SharedState>) -> Result<RuntimeStatus, String> {
+pub fn get_runtime_status(state: tauri::State<SharedState>) -> CommandResult<RuntimeStatus> {
     let app_state = state
         .inner()
         .lock()
-        .map_err(|e| format!("Failed to lock state: {}", e))?;
-    Ok(app_state.runtime_status.clone())
+        .map_err(|error| CommandError::from(format!("Failed to lock state: {error}")))?;
+    if let Some(runtime) = &app_state.runtime {
+        if matches!(
+            runtime.snapshot().phase,
+            RuntimePhase::Error { .. } | RuntimePhase::Shutdown
+        ) {
+            return Ok(RuntimeStatus::Error);
+        }
+    }
+    Ok(app_state.runtime_status())
 }
 
-/// 进入某个自定义序列详情页 — 记录激活序列并进入 ReadyCustom。
-///
-/// 前端进入详情子页时调用；离开时改调 `set_current_page("custom")` 复位为 Idle 并清空激活序列。
-/// 只有处于 ReadyCustom（激活了某序列）时，自定义热键才会启动该序列（见 hotkey.rs 门控）。
 #[tauri::command]
 pub fn enter_custom_sequence(
     id: String,
     state: tauri::State<SharedState>,
     app: tauri::AppHandle,
-) -> Result<(), String> {
-    let new_status = {
+) -> CommandResult<()> {
+    let status = {
         let mut app_state = state
             .inner()
             .lock()
-            .map_err(|e| format!("Failed to lock state: {}", e))?;
-
-        // 运行态守卫：模拟运行中不允许切换激活序列。
-        match app_state.runtime_status {
-            RuntimeStatus::RunningKeyboard
-            | RuntimeStatus::RunningMouse
-            | RuntimeStatus::RunningCustom
-            | RuntimeStatus::PickingMouse
-            | RuntimeStatus::Recording => {
-                return Err("busy: simulation running".to_string());
-            }
-            _ => {}
+            .map_err(|error| CommandError::from(format!("Failed to lock state: {error}")))?;
+        if app_state.activity != Activity::Idle {
+            return Err(format!("busy: {:?} is active", app_state.activity).into());
         }
-
-        app_state.current_page = "custom".to_string();
+        if !app_state
+            .config
+            .custom_sequences
+            .iter()
+            .any(|sequence| sequence.id == id)
+        {
+            return Err("custom_sequence_not_found".into());
+        }
+        app_state.navigation = PageId::Custom;
         app_state.active_custom_sequence_id = Some(id.clone());
-        app_state.runtime_status = RuntimeStatus::ReadyCustom;
-        log::info!("[enter_custom_sequence] active sequence id={}", id);
-        RuntimeStatus::ReadyCustom
+        log::info!("[navigation] active custom sequence id={id}");
+        app_state.runtime_status()
     };
-
-    if let Err(e) = app.emit(
-        "runtime_status_changed",
-        serde_json::json!({ "status": new_status }),
-    ) {
-        log::error!("[enter_custom_sequence] failed to emit event: {}", e);
-    }
-
+    emit_status(&app, status);
     Ok(())
+}
+
+fn emit_status(app: &tauri::AppHandle, status: RuntimeStatus) {
+    if let Err(error) = app.emit(
+        "runtime_status_changed",
+        serde_json::json!({ "status": status }),
+    ) {
+        log::error!("[runtime_cmd] failed to emit status: {error}");
+    }
 }

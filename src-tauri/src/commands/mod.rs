@@ -7,3 +7,4 @@ pub mod driver_cmd;
 pub mod pick_cmd;
 pub mod runtime_cmd;
 pub mod sound_cmd;
+pub mod system_cmd;

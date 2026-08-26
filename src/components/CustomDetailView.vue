@@ -27,18 +27,11 @@ const sequence = computed<CustomSequence | undefined>(() =>
 
 const capturedKey = ref<CapturedKey | null>(null)
 let unlistenPicked: UnlistenFn | null = null
+let unlistenStartFailed: UnlistenFn | null = null
+const conflictActionId = ref<string | null>(null)
+const isDeletingSequence = ref(false)
 
 onMounted(async () => {
-  // 取消勾选框后动作默认全启用：将历史 enabled=false 的动作归一为 true 并持久化。
-  if (sequence.value) {
-    const changed = sequence.value.actions.some(a => !a.enabled)
-    if (changed) {
-      sequence.value.actions.forEach(a => { a.enabled = true })
-      persist()
-    }
-  }
-
-  // 监听坐标拾取完成 → 回填到本序列内对应鼠标动作行
   unlistenPicked = await listen<{ rowId: string; x: number; y: number }>(
     'mouse_position_picked',
     (event) => {
@@ -52,15 +45,24 @@ onMounted(async () => {
       persist()
     },
   )
-})
 
+  unlistenStartFailed = await listen<{ error: string }>('simulation_start_failed', (event) => {
+    const [code, actionId] = event.payload.error.split(':')
+    if (code !== 'hotkey_conflict' || !actionId) return
+    conflictActionId.value = actionId
+    window.setTimeout(() => {
+      if (conflictActionId.value === actionId) conflictActionId.value = null
+    }, 4000)
+  })
+})
 onBeforeUnmount(() => {
   if (unlistenPicked) unlistenPicked()
+  if (unlistenStartFailed) unlistenStartFailed()
 })
 
 function persist(): void {
-  persistConfig().catch(() => {
-    // 错误已在 configUtil 中记录，不阻塞用户操作
+  void persistConfig().catch(() => {
+    // 事务工具已恢复最后成功快照并显示可重试提示。
   })
 }
 
@@ -91,11 +93,24 @@ function onNameCommit(): void {
 // ---- 删除整个序列 ----
 async function deleteSequence(): Promise<void> {
   const id = appStore.activeSequenceId
-  if (!id) return
+  if (
+    !id ||
+    isDeletingSequence.value ||
+    !window.confirm('确认删除整个自定义序列？删除后无法撤销。')
+  ) return
+
   const idx = appStore.customSequences.findIndex(s => s.id === id)
-  if (idx !== -1) appStore.customSequences.splice(idx, 1)
-  await persist()
-  await backToList()
+  if (idx === -1) return
+  isDeletingSequence.value = true
+  appStore.customSequences.splice(idx, 1)
+  try {
+    await persistConfig()
+    await backToList()
+  } catch {
+    // 配置事务已把被删除序列恢复到最后成功快照，停留详情页便于重试。
+  } finally {
+    isDeletingSequence.value = false
+  }
 }
 
 // ---- 添加动作 ----
@@ -204,7 +219,14 @@ function onIntervalCommit(action: CustomAction, e: Event): void {
         @blur="onNameCommit"
         @keydown.enter="onNameCommit"
       />
-      <button type="button" class="delete-seq-btn" @click="deleteSequence">删除序列</button>
+      <button
+        type="button"
+        class="delete-seq-btn"
+        :disabled="isDeletingSequence"
+        @click="deleteSequence"
+      >
+        {{ isDeletingSequence ? '正在删除…' : '删除序列' }}
+      </button>
     </header>
 
     <div class="top-bar">
@@ -217,6 +239,8 @@ function onIntervalCommit(action: CustomAction, e: Event): void {
       </button>
     </div>
 
+    <p v-if="conflictActionId" class="conflict-message">该动作与全局热键冲突，请修改后再启动。</p>
+
     <div class="list-container">
       <div v-if="!sequence || !sequence.actions.length" class="empty-hint">
         暂无动作，添加按键或鼠标动作
@@ -226,10 +250,12 @@ function onIntervalCommit(action: CustomAction, e: Event): void {
           v-for="(action, index) in sequence.actions"
           :key="action.id"
           class="list-row"
+          :class="{ disabled: !action.enabled, conflict: conflictActionId === action.id }"
         >
-          <span class="kind-tag" :class="action.kind">
-            {{ action.kind === 'keyboard' ? '键' : '鼠' }}
-          </span>
+          <label class="action-switch" :title="action.enabled ? '已启用' : '已停用'">
+            <input v-model="action.enabled" type="checkbox" @change="persist" />
+            <span class="switch-track"><span class="switch-thumb"></span></span>
+          </label>
 
           <!-- 键盘行：显示键位徽标 -->
           <span v-if="action.kind === 'keyboard'" class="key-badge">
@@ -455,26 +481,49 @@ function onIntervalCommit(action: CustomAction, e: Event): void {
   transition: opacity var(--transition-fast) var(--ease-default);
 }
 
-.kind-tag {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 20px;
-  height: 20px;
-  border-radius: 4px;
-  font-size: 11px;
-  font-weight: 600;
+.action-switch {
+  position: relative;
+  width: 30px;
+  height: 18px;
   flex-shrink: 0;
+  cursor: pointer;
 }
 
-.kind-tag.keyboard {
-  background: color-mix(in srgb, var(--accent) 18%, transparent);
-  color: var(--accent);
+.action-switch input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
 }
 
-.kind-tag.mouse {
-  background: color-mix(in srgb, var(--warning) 20%, transparent);
-  color: var(--warning);
+.switch-track {
+  display: block;
+  width: 30px;
+  height: 18px;
+  padding: 2px;
+  background: var(--border-color);
+  border-radius: 9px;
+  transition: background var(--transition-fast) var(--ease-default);
+}
+
+.switch-thumb {
+  display: block;
+  width: 14px;
+  height: 14px;
+  background: var(--color-paper-white);
+  border-radius: 50%;
+  transition: transform var(--transition-fast) var(--ease-default);
+}
+
+.action-switch input:checked + .switch-track {
+  background: var(--accent);
+}
+
+.action-switch input:checked + .switch-track .switch-thumb {
+  transform: translateX(12px);
+}
+
+.list-row.disabled > :not(.action-switch) {
+  opacity: 0.48;
 }
 
 .key-badge {
@@ -661,4 +710,14 @@ function onIntervalCommit(action: CustomAction, e: Event): void {
 .list-scroll::-webkit-scrollbar-thumb:hover {
   background: var(--text-disabled);
 }
-</style>
+
+.conflict-message {
+  margin: 0;
+  color: var(--warning);
+  font-size: 11px;
+}
+
+.list-row.conflict {
+  border-color: var(--warning);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--warning) 45%, transparent);
+}</style>

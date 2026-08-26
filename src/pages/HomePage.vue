@@ -2,8 +2,7 @@
 /**
  * 首页 — 状态仪表盘（DESIGN 15.4 / 需求 3.3.1）
  * 阶段 9：onMounted 调用 get_init_warning，有写盘失败时显示小字提示。
- * 阶段 10：管理员权限状态接 get_admin_status；未授权时提供「以管理员身份重启」按钮，
- *         点击触发 request_admin_restart（UAC 提示 + 自身退出）。
+ * 主程序保持普通权限；安装、卸载和重启仅对具体系统进程请求 UAC。
  *   - 驱动状态：阶段 11 接 check_driver_status / install_driver
  *   - 热键概览：由 load_config 提供（阶段 8 已接入）
  * 阶段 12：移除「模拟运行（mock）」临时切换按钮。
@@ -11,6 +10,7 @@
 import { ref, onMounted } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import { appStore } from '../stores/appStore'
+import { commandError } from '../lib/errorUtil'
 import type { DriverStatus } from '../types/config'
 
 const APP_VERSION = '0.1.0'
@@ -18,12 +18,7 @@ const APP_TAGLINE = 'Windows 按键与鼠标模拟工具'
 
 // 启动时配置写盘失败的警告（极小概率，默认为空）
 const configWarning = ref<string | null>(null)
-
-// 阶段 10：管理员权限状态（来自后端 get_admin_status）
-// 默认 true 避免首次渲染闪过橙色警告；onMounted 立即覆盖为真实值。
-const isAdmin = ref(true)
-const isRestarting = ref(false)
-const restartError = ref<string | null>(null)
+const isAdmin = ref<boolean | null>(null)
 
 // 阶段 11：驱动状态（来自后端 check_driver_status）
 const driverStatus = ref<DriverStatus>('NotInstalled')
@@ -41,22 +36,6 @@ const pendingReboot = ref<'installed' | 'uninstalled' | null>(null)
 const driverMessage = ref<string | null>(null)
 const UNINSTALL_PHRASE = '卸载驱动'
 
-async function onRestartAsAdmin(): Promise<void> {
-  if (isRestarting.value) return
-  isRestarting.value = true
-  restartError.value = null
-  try {
-    await invoke('request_admin_restart')
-    // 后端会在 200ms 内退出当前进程，前端无需做更多事情
-  } catch (err) {
-    // 用户拒绝 UAC 或调度失败
-    isRestarting.value = false
-    restartError.value = String(err).includes('declined')
-      ? '已取消提权'
-      : '提权重启失败，请稍后重试'
-  }
-}
-
 async function onInstallDriver(): Promise<void> {
   if (isInstalling.value) return
   isInstalling.value = true
@@ -69,18 +48,22 @@ async function onInstallDriver(): Promise<void> {
     pendingReboot.value = 'installed'
     driverMessage.value = '驱动已安装，需重启电脑后才会加载。'
   } catch (err) {
-    const errStr = String(err)
-    installError.value = errStr.includes('permission_denied')
-      ? '权限不足，请点击上方「以管理员身份重启」按钮'
-      : errStr.includes('declined')
-        ? '已取消安装'
-        : errStr.includes('not found')
-          ? '安装程序不存在，请检查 drivers 目录'
-          : '安装失败，请稍后重试'
+    installError.value = formatDriverError(err, '安装')
     log_error('[HomePage] install driver failed:', err)
   } finally {
     isInstalling.value = false
   }
+}
+
+function formatDriverError(error: unknown, operation: '安装' | '卸载'): string {
+  const detail = commandError(error)
+  if (detail.code === 'resource_integrity_failed') return '驱动安装资源校验失败，已拒绝提权执行'
+  if (detail.code === 'elevation_cancelled') {
+    return `已取消${operation}`
+  }
+  if (detail.code === 'busy') return `当前有任务正在运行，请停止后再${operation}`
+  if (detail.code === 'not_found') return '安装程序不存在，请检查 driver 目录'
+  return `${operation}失败，请稍后重试`
 }
 
 function log_error(msg: string, err: unknown): void {
@@ -96,22 +79,17 @@ async function onReboot(): Promise<void> {
     // 系统即将重启，前端无需后续处理
   } catch (err) {
     isRebooting.value = false
-    installError.value = String(err).includes('permission_denied')
-      ? '权限不足，请点击上方「以管理员身份重启」按钮'
+    installError.value = commandError(err).code === 'elevation_cancelled'
+      ? '已取消重启'
       : '重启失败，请手动重启电脑'
     log_error('[HomePage] reboot failed:', err)
   }
 }
 
-/** 点击「卸载驱动」：先判管理员权限，再展开文字确认区（防误触） */
+/** 点击「卸载驱动」后展开文字确认区，确认后仅受限维护 helper 进程请求 UAC。 */
 function onUninstallClick(): void {
   installError.value = null
   driverMessage.value = null
-  // 权限判断前置——非管理员直接提示提权，不展开输入框
-  if (!isAdmin.value) {
-    installError.value = '权限不足，请点击上方「以管理员身份重启」按钮'
-    return
-  }
   showUninstallConfirm.value = true
 }
 
@@ -140,16 +118,7 @@ async function onConfirmUninstall(): Promise<void> {
     pendingReboot.value = 'uninstalled'
     driverMessage.value = '驱动已卸载，需重启电脑后彻底生效。'
   } catch (err) {
-    const errStr = String(err)
-    installError.value = errStr.includes('permission_denied')
-      ? '权限不足，请点击上方「以管理员身份重启」按钮'
-      : errStr.includes('declined')
-        ? '已取消卸载'
-        : errStr.includes('busy')
-          ? '模拟运行中，请先停止后再卸载'
-          : errStr.includes('not found')
-            ? '安装程序不存在，请检查 drivers 目录'
-            : '卸载失败，请稍后重试'
+    installError.value = formatDriverError(err, '卸载')
     log_error('[HomePage] uninstall driver failed:', err)
   } finally {
     isUninstalling.value = false
@@ -157,11 +126,15 @@ async function onConfirmUninstall(): Promise<void> {
 }
 
 onMounted(async () => {
-  // 并行触发，任一失败不阻塞另一项
+  // 并行触发，任一失败不阻塞其他状态检测。
   const warningPromise = invoke<string | null>('get_init_warning').catch(() => null)
-  const adminPromise = invoke<boolean>('get_admin_status').catch(() => true)
+  const adminPromise = invoke<boolean>('get_admin_status').catch(() => null)
   const driverPromise = invoke<string>('check_driver_status').catch(() => '"NotInstalled"')
-  const [warning, admin, driverRaw] = await Promise.all([warningPromise, adminPromise, driverPromise])
+  const [warning, admin, driverRaw] = await Promise.all([
+    warningPromise,
+    adminPromise,
+    driverPromise,
+  ])
   configWarning.value = warning
   isAdmin.value = admin
   try {
@@ -183,30 +156,16 @@ onMounted(async () => {
       <p class="tagline">{{ APP_TAGLINE }}</p>
     </header>
 
-    <!-- 管理员权限状态 -->
-    <div
-      class="status-line"
-      :class="isAdmin ? 'ok' : 'warn'"
-    >
-      <span class="status-icon">{{ isAdmin ? '✓' : '!' }}</span>
+    <div class="status-line" :class="isAdmin ? 'warn' : 'ok'">
+      <span class="status-icon">{{ isAdmin ? '!' : '✓' }}</span>
       <span class="status-text">
-        {{ isAdmin
-           ? '管理员权限已授予'
-           : (driverStatus === 'NotInstalled'
-              ? '非管理员权限，安装驱动需提权'
-              : '非管理员权限，卸载驱动需提权') }}
+        {{ isAdmin === true
+          ? '主程序当前以管理员权限运行；日常使用无需此权限'
+          : isAdmin === false
+            ? '主程序以普通权限运行；驱动维护时 Windows 会单独请求授权'
+            : '无法读取当前权限状态；驱动维护仍会单独请求授权' }}
       </span>
-      <button
-        v-if="!isAdmin"
-        type="button"
-        class="restart-btn"
-        :disabled="isRestarting"
-        @click="onRestartAsAdmin"
-      >
-        {{ isRestarting ? '正在重启...' : '以管理员身份重启' }}
-      </button>
     </div>
-    <p v-if="restartError" class="restart-error">{{ restartError }}</p>
 
     <!-- 驱动状态卡片 -->
     <div class="card driver-card">

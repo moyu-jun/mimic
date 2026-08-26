@@ -36,10 +36,12 @@ async function createSequence(): Promise<void> {
     actions: [],
   }
   appStore.customSequences.push(seq)
-  // 结构性变更：立即持久化
-  await persistConfig().catch(() => {
-    // 错误已在 configUtil 中记录，不阻塞用户操作
-  })
+  // 结构性变更只有在后端原子写盘确认后才进入详情页；失败由事务工具回滚。
+  try {
+    await persistConfig()
+  } catch {
+    return
+  }
   await enterDetail(seq.id)
 }
 </script>

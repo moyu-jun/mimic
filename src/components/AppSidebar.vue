@@ -4,10 +4,17 @@
  * 主菜单（首页 / 按键模拟 / 鼠标模拟）置顶，「设置」固定底部。
  * 激活项使用强调色左条 + 高亮背景；菜单项左侧带线性图标。
  */
+import { computed } from 'vue'
 import { appStore, setPage } from '../stores/appStore'
 import { PAGE_LABELS, MAIN_PAGES } from '../lib/pages'
 import type { AppPage } from '../types/config'
 import MenuIcon from './MenuIcon.vue'
+
+const navigationBlocked = computed(() =>
+  ['RunningKeyboard', 'RunningMouse', 'RunningCustom', 'PickingMouse', 'Recording'].includes(
+    appStore.runtimeStatus,
+  ),
+)
 
 function isActive(page: AppPage): boolean {
   return appStore.currentPage === page
@@ -24,6 +31,7 @@ function isActive(page: AppPage): boolean {
         class="menu-item"
         :class="{ active: isActive(page) }"
         :aria-current="isActive(page) ? 'page' : undefined"
+        :disabled="navigationBlocked"
         @click="setPage(page)"
       >
         <MenuIcon :name="page" />
@@ -36,6 +44,7 @@ function isActive(page: AppPage): boolean {
         class="menu-item"
         :class="{ active: isActive('settings') }"
         :aria-current="isActive('settings') ? 'page' : undefined"
+        :disabled="navigationBlocked"
         @click="setPage('settings')"
       >
         <MenuIcon name="settings" />
@@ -85,7 +94,12 @@ function isActive(page: AppPage): boolean {
   min-width: 0;
 }
 
-.menu-item:hover {
+.menu-item:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.menu-item:hover:not(:disabled) {
   background: var(--bg-elevated);
   color: var(--text-primary);
 }

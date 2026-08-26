@@ -6,15 +6,11 @@
 //   - keyboard : 键盘动作类型 KeyAction
 //   - mouse    : 鼠标动作类型 MouseAction + 坐标转换 CoordinateMapper
 //   - driver   : InputDriver trait + InterceptionDriver 实现（驱动抽象层）
-//   - executor : Scheduler 序列调度器（生产者逻辑）
 //   - timing   : 统一时序常量（v3.0 新增）
-//
-// worker 消费端见 crate::simulation_worker。
 
 pub mod action;
 pub mod driver;
 pub mod event;
-pub mod executor;
 pub mod keyboard;
 pub mod mouse;
 pub mod timing;

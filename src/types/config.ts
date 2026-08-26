@@ -35,9 +35,6 @@ export type MouseActionType =
   | 'click_left'
   | 'click_right'
   | 'click_middle'
-  | 'scroll_up'
-  | 'scroll_down'
-  | 'drag'
 
 /** 按键捕获结果 */
 export interface CapturedKey {
@@ -61,9 +58,6 @@ export interface MouseConfig {
   actionType: MouseActionType
   x: number | null
   y: number | null
-  scrollDelta?: number
-  dragToX?: number
-  dragToY?: number
   intervalMs: number
 }
 
@@ -88,12 +82,16 @@ export interface HotkeyConfig {
   stop: CapturedKey
 }
 
+/** 日志等级 */
+export type LogLevel = 'error' | 'warn' | 'info' | 'debug'
+
 /** 应用完整配置 */
 export interface AppConfig {
   keyboardConfigs: KeyboardConfig[]
   mouseConfigs: MouseConfig[]
   customSequences: CustomSequence[]
   hotkeys: HotkeyConfig
+  logLevel: LogLevel
 }
 
 /** 热键更新结果 */

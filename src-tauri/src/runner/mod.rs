@@ -1,8 +1,6 @@
-// 运行器层 — ARCHITECTURE v3.0 阶段 B
-//
-// SimulationRunner 封装一次模拟运行的完整生命周期（启动→循环→停止），
-// 替代原 hotkeys_interception.rs 中重复的 handle_start_keyboard / handle_start_mouse。
-// 监听层只需按当前页选一个 SequenceBuilder 传入，键鼠混合共用同一条链路。
+//! 模拟运行入口。
+//!
+//! SequenceBuilder 只负责从配置生成不可变序列；所有运行生命周期由 Runtime Actor 管理。
 
 mod builder;
 
@@ -10,140 +8,82 @@ pub use builder::{
     CustomSequenceBuilder, KeyboardSequenceBuilder, MouseSequenceBuilder, SequenceBuilder,
 };
 
-use crate::simulation::executor::Scheduler;
-use crate::state::{RuntimeStatus, SharedState};
+use crate::runtime::StopOutcome;
+use crate::state::{Activity, SharedState, SimulationMode};
 use log::{error, info};
-use std::sync::atomic::Ordering;
-use tauri::{AppHandle, Emitter};
+use tauri::AppHandle;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StartOutcome {
+    Started,
+    NoExecutableActions,
+}
 
 pub struct SimulationRunner;
 
 impl SimulationRunner {
-    /// 启动一次模拟运行（参数化，键鼠混合共用）：
-    ///   1. builder.build(config) → 若 None 直接忽略（不切状态/不播音/不 emit）
-    ///   2. 置 running_status + 清 stop_flag
-    ///   3. play_start() + emit runtime_status_changed
-    ///   4. spawn 生产者线程：Scheduler::execute_loop(sequence, stop_flag)
-    pub fn start(app: &AppHandle, state: &SharedState, builder: &dyn SequenceBuilder) {
-        let new_status = builder.running_status();
-        info!("[runner] start called: target_status={:?}", new_status);
+    /// 构建序列并同步提交给 Runtime Actor。
+    ///
+    /// 无有效动作时静默忽略；Actor 确认启动后才播放启动提示音。
+    pub fn start(
+        _app: &AppHandle,
+        state: &SharedState,
+        builder: &dyn SequenceBuilder,
+    ) -> Result<StartOutcome, String> {
+        let mode = builder.mode();
 
-        // 先构建序列并取出运行所需句柄；None 表示无有效动作，静默忽略本次启动。
-        let (sequence, event_tx, stop_flag) = {
-            let mut app_state = match state.lock() {
-                Ok(s) => {
-                    info!(
-                        "[runner] current state: page={}, status={:?}, active_custom_id={:?}",
-                        s.current_page, s.runtime_status, s.active_custom_sequence_id
-                    );
-                    s
-                }
-                Err(e) => {
-                    error!("[runner] start: failed to lock state: {}", e);
-                    return;
-                }
+        let (sequence, runtime) = {
+            let mut app_state = state
+                .lock()
+                .map_err(|error| format!("Failed to lock state: {error}"))?;
+            builder.validate_start(&app_state.config)?;
+            let Some(sequence) = builder.build(&app_state.config) else {
+                info!("[runner] start ignored: no executable actions");
+                return Ok(StartOutcome::NoExecutableActions);
             };
-
-            info!("[runner] calling builder.build()...");
-            let sequence = match builder.build(&app_state.config) {
-                Some(seq) => {
-                    info!(
-                        "[runner] builder.build() returned {} steps",
-                        seq.steps.len()
-                    );
-                    seq
-                }
-                None => {
-                    info!("[runner] start ignored: builder produced no valid actions");
-                    return;
-                }
-            };
-
-            app_state.runtime_status = new_status.clone();
-            app_state.stop_flag.store(false, Ordering::Relaxed);
-            (
-                sequence,
-                app_state.event_tx.clone(),
-                app_state.stop_flag.clone(),
-            )
+            let runtime = app_state
+                .runtime
+                .clone()
+                .ok_or_else(|| "runtime unavailable".to_string())?;
+            app_state.acquire_activity(Activity::Simulating)?;
+            app_state.simulation_mode = Some(match mode {
+                crate::runtime::RuntimeMode::Keyboard => SimulationMode::Keyboard,
+                crate::runtime::RuntimeMode::Mouse => SimulationMode::Mouse,
+                crate::runtime::RuntimeMode::Custom => SimulationMode::Custom,
+            });
+            (sequence, runtime)
         };
 
-        info!("[runner] start triggered: -> {:?}", new_status);
-
-        // 启动提示音 — 已确认有有效动作，真正进入模拟循环。
-        // 尽早调用（emit 之前），使音频设备初始化与 IPC 事件派发并行，降低感知延迟。
+        let run_id = runtime.start(sequence, mode).map_err(|error| {
+            if let Ok(mut app_state) = state.lock() {
+                app_state.release_activity(Activity::Simulating);
+            }
+            error!("[runner] start rejected: {}", error);
+            error.to_string()
+        })?;
+        info!("[runner] run {} accepted: {:?}", run_id, mode);
         crate::sound::play_start();
-
-        if let Err(e) = app.emit(
-            "runtime_status_changed",
-            serde_json::json!({ "status": new_status }),
-        ) {
-            error!("[runner] failed to emit runtime_status_changed: {}", e);
-        }
-
-        std::thread::spawn(move || {
-            info!(
-                "[runner] simulation loop started, {} steps",
-                sequence.steps.len()
-            );
-            Scheduler::new(event_tx).execute_loop(&sequence, &stop_flag);
-        });
+        Ok(StartOutcome::Started)
     }
 
-    /// 停止当前模拟运行：置 stop_flag → 短等待 → 回 Ready* + play_stop + emit。
-    pub fn stop(app: &AppHandle, state: &SharedState) {
-        info!("[runner] stop triggered: Running* -> Ready* or Idle");
-
-        // 停止提示音 — 本函数仅在 Running* 状态下调用，即停止真正生效。
-        crate::sound::play_stop();
-
-        // 设置停止标记
-        {
-            let app_state = match state.lock() {
-                Ok(s) => s,
-                Err(e) => {
-                    error!("[runner] stop: failed to lock state: {}", e);
-                    return;
-                }
-            };
-            app_state.stop_flag.store(true, Ordering::Relaxed);
-        }
-
-        // 等待一小段时间让模拟循环退出
-        std::thread::sleep(std::time::Duration::from_millis(50));
-
-        // 更新状态 — 按当前页面与激活序列决定停止后的状态：
-        //   - 自定义序列停止 → ReadyCustom（仍在详情页，可再启动）
-        //   - keyboard 页停止 → ReadyKeyboard（可再启动）
-        //   - mouse 页停止 → ReadyMouse（可再启动）
-        //   - 其它页面 → Idle
-        let new_status = {
-            let mut app_state = match state.lock() {
-                Ok(s) => s,
-                Err(e) => {
-                    error!("[runner] stop: failed to lock state after wait: {}", e);
-                    return;
-                }
-            };
-            let status = if app_state.active_custom_sequence_id.is_some() {
-                RuntimeStatus::ReadyCustom
-            } else {
-                match app_state.current_page.as_str() {
-                    "keyboard" => RuntimeStatus::ReadyKeyboard,
-                    "mouse" => RuntimeStatus::ReadyMouse,
-                    _ => RuntimeStatus::Idle,
-                }
-            };
-            app_state.runtime_status = status.clone();
-            status
+    /// 同步停止当前任务。
+    ///
+    /// 返回成功时 Actor 已终止旧任务并完成输入释放，不再使用固定 sleep 猜测完成。
+    pub fn stop(_app: &AppHandle, state: &SharedState) -> Result<StopOutcome, String> {
+        let runtime = {
+            let app_state = state
+                .lock()
+                .map_err(|error| format!("Failed to lock state: {error}"))?;
+            app_state
+                .runtime
+                .clone()
+                .ok_or_else(|| "runtime unavailable".to_string())?
         };
 
-        // 发送 runtime_status_changed 事件
-        if let Err(e) = app.emit(
-            "runtime_status_changed",
-            serde_json::json!({ "status": new_status }),
-        ) {
-            error!("[runner] failed to emit runtime_status_changed: {}", e);
+        let outcome = runtime.stop().map_err(|error| error.to_string())?;
+        if outcome == StopOutcome::Stopped {
+            crate::sound::play_stop();
         }
+        Ok(outcome)
     }
 }

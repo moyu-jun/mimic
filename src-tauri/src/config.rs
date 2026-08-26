@@ -1,43 +1,105 @@
-// 配置模型与默认配置 — ARCHITECTURE v3.0 重构
-//
-// 本模块定义前后端共享的配置结构体，并提供默认配置初始化。
-// 所有结构体必须标注 #[serde(rename_all = "camelCase")] 确保 Rust snake_case
-// 字段序列化为前端 camelCase（key_label → keyLabel）。
-//
-// 重构要点：
-// - 配置层使用 XxxConfig 命名（与模拟层 XxxAction 区分）
-// - 增加动作类型枚举（KeyActionType / MouseActionType）
-// - selected 改名为 enabled（更语义化）
+//! 配置模型、校验与原子持久化。
+//!
+//! 启动时配置缺失则生成代码内置默认值；文件过大、格式错误或违反任一边界时，直接
+//! 用默认配置覆盖。用户更新使用 validate -> atomic persist -> swap，失败不更新内存。
 
+use crate::paths::PortablePaths;
 use ini::Ini;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
-use std::env;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, MutexGuard};
 
 pub const DEFAULT_INTERVAL_MS: u64 = 20;
 pub const MIN_INTERVAL_MS: u64 = 5;
+pub const MAX_INTERVAL_MS: u64 = 3_600_000;
+pub const MAX_KEYBOARD_CONFIGS: usize = 500;
+pub const MAX_MOUSE_CONFIGS: usize = 500;
+pub const MAX_CUSTOM_SEQUENCES: usize = 100;
+pub const MAX_CUSTOM_ACTIONS: usize = 1_000;
+pub const MAX_SEQUENCE_NAME_CHARS: usize = 64;
+pub const MAX_CONFIG_FILE_BYTES: u64 = 5 * 1024 * 1024;
+
+static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(1);
+static CONFIG_TRANSACTION: Mutex<()> = Mutex::new(());
+
+/// 串行化配置候选读取、原子写盘和内存提交的完整事务。
+pub fn transaction_guard() -> Result<MutexGuard<'static, ()>, String> {
+    CONFIG_TRANSACTION
+        .lock()
+        .map_err(|_| "config transaction lock poisoned".to_string())
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum LogLevel {
+    Error,
+    Warn,
+    Info,
+    Debug,
+}
+
+impl Default for LogLevel {
+    fn default() -> Self {
+        if cfg!(debug_assertions) {
+            Self::Info
+        } else {
+            Self::Error
+        }
+    }
+}
+
+impl LogLevel {
+    pub fn as_filter(self) -> log::LevelFilter {
+        match self {
+            Self::Error => log::LevelFilter::Error,
+            Self::Warn => log::LevelFilter::Warn,
+            Self::Info => log::LevelFilter::Info,
+            Self::Debug => log::LevelFilter::Debug,
+        }
+    }
+
+    fn as_ini_value(self) -> &'static str {
+        match self {
+            Self::Error => "error",
+            Self::Warn => "warn",
+            Self::Info => "info",
+            Self::Debug => "debug",
+        }
+    }
+
+    fn from_ini_value(value: &str) -> Result<Self, String> {
+        match value.to_ascii_lowercase().as_str() {
+            "error" => Ok(Self::Error),
+            "warn" => Ok(Self::Warn),
+            "info" => Ok(Self::Info),
+            "debug" => Ok(Self::Debug),
+            _ => Err(format!("invalid log level: {value}")),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum MouseActionType {
     #[default]
-    ClickLeft,
-    ClickRight,
-    ClickMiddle,
-    ScrollUp,
-    ScrollDown,
-    Drag,
+    #[serde(rename = "click_left")]
+    Left,
+    #[serde(rename = "click_right")]
+    Right,
+    #[serde(rename = "click_middle")]
+    Middle,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct CapturedKey {
     pub key_label: String,
     pub scan_code: u16,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct KeyboardConfig {
     pub id: String,
@@ -47,7 +109,7 @@ pub struct KeyboardConfig {
     pub interval_ms: u64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct MouseConfig {
     pub id: String,
@@ -56,26 +118,17 @@ pub struct MouseConfig {
     pub action_type: MouseActionType,
     pub x: Option<i32>,
     pub y: Option<i32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub scroll_delta: Option<i32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub drag_to_x: Option<i32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub drag_to_y: Option<i32>,
     pub interval_ms: u64,
 }
 
-/// 自定义序列中的单个动作 — 判别联合，复用现有 Keyboard/MouseConfig。
-/// serde 内部标签 `kind`：{"kind":"keyboard", ...} / {"kind":"mouse", ...}。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum CustomAction {
     Keyboard(KeyboardConfig),
     Mouse(MouseConfig),
 }
 
-/// 具名自定义序列 — actions 为有序数组，执行顺序 = 数组顺序。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct CustomSequence {
     pub id: String,
@@ -83,14 +136,14 @@ pub struct CustomSequence {
     pub actions: Vec<CustomAction>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct HotkeyConfig {
     pub start: CapturedKey,
     pub stop: CapturedKey,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct AppConfig {
     pub keyboard_configs: Vec<KeyboardConfig>,
@@ -98,6 +151,8 @@ pub struct AppConfig {
     #[serde(default)]
     pub custom_sequences: Vec<CustomSequence>,
     pub hotkeys: HotkeyConfig,
+    #[serde(default)]
+    pub log_level: LogLevel,
 }
 
 pub fn default_config() -> AppConfig {
@@ -112,12 +167,9 @@ pub fn default_config() -> AppConfig {
         mouse_configs: vec![MouseConfig {
             id: "default-mouse-1".to_string(),
             enabled: true,
-            action_type: MouseActionType::ClickLeft,
+            action_type: MouseActionType::Left,
             x: None,
             y: None,
-            scroll_delta: None,
-            drag_to_x: None,
-            drag_to_y: None,
             interval_ms: DEFAULT_INTERVAL_MS,
         }],
         custom_sequences: Vec::new(),
@@ -131,276 +183,496 @@ pub fn default_config() -> AppConfig {
                 scan_code: 88,
             },
         },
+        log_level: LogLevel::default(),
     }
 }
 
 pub fn config_path() -> Result<PathBuf, String> {
-    let exe_path = env::current_exe().map_err(|e| format!("Failed to get exe path: {}", e))?;
-    let exe_dir = exe_path
-        .parent()
-        .ok_or_else(|| "Failed to get exe directory".to_string())?;
-    Ok(exe_dir.join("mimic.ini"))
+    Ok(PortablePaths::current()?.config_file())
 }
 
-pub fn sanitize_config(config: &mut AppConfig) {
-    for cfg in &mut config.keyboard_configs {
-        if cfg.interval_ms < MIN_INTERVAL_MS {
-            log::warn!(
-                "[config] keyboard config {} intervalMs {} < {}, clamped",
-                cfg.id,
-                cfg.interval_ms,
-                MIN_INTERVAL_MS
-            );
-            cfg.interval_ms = MIN_INTERVAL_MS;
-        }
-    }
-    for cfg in &mut config.mouse_configs {
-        if cfg.interval_ms < MIN_INTERVAL_MS {
-            log::warn!(
-                "[config] mouse config {} intervalMs {} < {}, clamped",
-                cfg.id,
-                cfg.interval_ms,
-                MIN_INTERVAL_MS
-            );
-            cfg.interval_ms = MIN_INTERVAL_MS;
-        }
-    }
+pub fn validate_config(config: &AppConfig) -> Result<(), String> {
+    ensure_max(
+        "keyboard configs",
+        config.keyboard_configs.len(),
+        MAX_KEYBOARD_CONFIGS,
+    )?;
+    ensure_max(
+        "mouse configs",
+        config.mouse_configs.len(),
+        MAX_MOUSE_CONFIGS,
+    )?;
+    ensure_max(
+        "custom sequences",
+        config.custom_sequences.len(),
+        MAX_CUSTOM_SEQUENCES,
+    )?;
 
-    dedupe_ids(
-        &mut config.keyboard_configs,
-        |c| &c.id,
-        |c, new_id| c.id = new_id,
+    validate_hotkey(&config.hotkeys.start, "start hotkey")?;
+    validate_hotkey(&config.hotkeys.stop, "stop hotkey")?;
+    validate_keyboard_configs(&config.keyboard_configs, "keyboard")?;
+    for keyboard in &config.keyboard_configs {
+        if keyboard.scan_code == config.hotkeys.start.scan_code
+            || keyboard.scan_code == config.hotkeys.stop.scan_code
+        {
+            return Err(format!(
+                "keyboard {} conflicts with a global hotkey",
+                keyboard.id
+            ));
+        }
+    }
+    validate_mouse_configs(&config.mouse_configs, "mouse")?;
+    ensure_unique_ids(
+        config
+            .keyboard_configs
+            .iter()
+            .map(|config| config.id.as_str()),
         "keyboard",
-    );
-    dedupe_ids(
-        &mut config.mouse_configs,
-        |c| &c.id,
-        |c, new_id| c.id = new_id,
+    )?;
+    ensure_unique_ids(
+        config.mouse_configs.iter().map(|config| config.id.as_str()),
         "mouse",
-    );
+    )?;
+    ensure_unique_ids(
+        config
+            .custom_sequences
+            .iter()
+            .map(|sequence| sequence.id.as_str()),
+        "custom sequence",
+    )?;
 
-    // 自定义序列：每个序列内 clamp interval + 动作 id 去重；再对序列 id 去重。
-    for seq in &mut config.custom_sequences {
-        for action in &mut seq.actions {
-            let interval = match action {
-                CustomAction::Keyboard(c) => &mut c.interval_ms,
-                CustomAction::Mouse(c) => &mut c.interval_ms,
+    for sequence in &config.custom_sequences {
+        let name_chars = sequence.name.chars().count();
+        if name_chars == 0 || name_chars > MAX_SEQUENCE_NAME_CHARS {
+            return Err(format!(
+                "custom sequence {} name must contain 1..={} characters",
+                sequence.id, MAX_SEQUENCE_NAME_CHARS
+            ));
+        }
+        ensure_max(
+            &format!("custom sequence {} actions", sequence.id),
+            sequence.actions.len(),
+            MAX_CUSTOM_ACTIONS,
+        )?;
+
+        let mut action_ids = HashSet::new();
+        for action in &sequence.actions {
+            let (id, interval_ms) = match action {
+                CustomAction::Keyboard(config) => {
+                    validate_keyboard(config, "custom keyboard")?;
+                    (&config.id, config.interval_ms)
+                }
+                CustomAction::Mouse(config) => {
+                    validate_mouse(config, "custom mouse")?;
+                    (&config.id, config.interval_ms)
+                }
             };
-            if *interval < MIN_INTERVAL_MS {
-                log::warn!(
-                    "[config] custom sequence {} action intervalMs {} < {}, clamped",
-                    seq.id,
-                    *interval,
-                    MIN_INTERVAL_MS
-                );
-                *interval = MIN_INTERVAL_MS;
+            validate_interval(interval_ms, "custom action")?;
+            if id.is_empty() || !action_ids.insert(id.as_str()) {
+                return Err(format!(
+                    "custom sequence {} has empty or duplicate action id: {}",
+                    sequence.id, id
+                ));
             }
         }
-        dedupe_ids(
-            &mut seq.actions,
-            |a| match a {
-                CustomAction::Keyboard(c) => &c.id,
-                CustomAction::Mouse(c) => &c.id,
-            },
-            |a, new_id| match a {
-                CustomAction::Keyboard(c) => c.id = new_id,
-                CustomAction::Mouse(c) => c.id = new_id,
-            },
-            "custom action",
-        );
     }
-    dedupe_ids(
-        &mut config.custom_sequences,
-        |s| &s.id,
-        |s, new_id| s.id = new_id,
-        "custom sequence",
-    );
+
+    Ok(())
 }
 
-fn dedupe_ids<T>(
-    configs: &mut [T],
-    get_id: impl Fn(&T) -> &str,
-    mut set_id: impl FnMut(&mut T, String),
-    kind: &str,
-) {
-    let mut seen: HashSet<String> = HashSet::new();
-    for cfg in configs.iter_mut() {
-        let original = get_id(cfg).to_string();
-        if seen.insert(original.clone()) {
-            continue;
-        }
-        let mut counter = 1u32;
-        let new_id = loop {
-            let candidate = format!("{}-dup-{}", original, counter);
-            if !seen.contains(&candidate) {
-                break candidate;
-            }
-            counter += 1;
-        };
-        log::warn!(
-            "[config] {} config duplicate id `{}`, renamed to `{}`",
-            kind,
-            original,
-            new_id
-        );
-        seen.insert(new_id.clone());
-        set_id(cfg, new_id);
+fn validate_keyboard_configs(configs: &[KeyboardConfig], kind: &str) -> Result<(), String> {
+    for config in configs {
+        validate_keyboard(config, kind)?;
     }
+    Ok(())
+}
+
+fn validate_mouse_configs(configs: &[MouseConfig], kind: &str) -> Result<(), String> {
+    for config in configs {
+        validate_mouse(config, kind)?;
+    }
+    Ok(())
+}
+
+fn validate_hotkey(key: &CapturedKey, kind: &str) -> Result<(), String> {
+    if key.key_label.trim().is_empty() || interception::ScanCode::try_from(key.scan_code).is_err() {
+        return Err(format!("{kind} is invalid"));
+    }
+    Ok(())
+}
+
+fn validate_keyboard(config: &KeyboardConfig, kind: &str) -> Result<(), String> {
+    if config.id.is_empty() {
+        return Err(format!("{kind} id must not be empty"));
+    }
+    if config.key_label.trim().is_empty()
+        || interception::ScanCode::try_from(config.scan_code).is_err()
+    {
+        return Err(format!("{kind} key is invalid"));
+    }
+    validate_interval(config.interval_ms, kind)
+}
+
+fn validate_mouse(config: &MouseConfig, kind: &str) -> Result<(), String> {
+    if config.id.is_empty() {
+        return Err(format!("{kind} id must not be empty"));
+    }
+    validate_interval(config.interval_ms, kind)
+}
+fn validate_interval(interval_ms: u64, kind: &str) -> Result<(), String> {
+    if !(MIN_INTERVAL_MS..=MAX_INTERVAL_MS).contains(&interval_ms) {
+        return Err(format!(
+            "{kind} interval {interval_ms} is outside {MIN_INTERVAL_MS}..={MAX_INTERVAL_MS}"
+        ));
+    }
+    Ok(())
+}
+
+fn ensure_max(kind: &str, actual: usize, maximum: usize) -> Result<(), String> {
+    if actual > maximum {
+        Err(format!("{kind} count {actual} exceeds {maximum}"))
+    } else {
+        Ok(())
+    }
+}
+
+fn ensure_unique_ids<'a>(ids: impl IntoIterator<Item = &'a str>, kind: &str) -> Result<(), String> {
+    let mut seen = HashSet::new();
+    for id in ids {
+        if id.is_empty() || !seen.insert(id) {
+            return Err(format!("{kind} has empty or duplicate id: {id}"));
+        }
+    }
+    Ok(())
 }
 
 pub fn load_or_init_graceful() -> (AppConfig, Option<String>) {
     match load_or_init() {
         Ok(config) => (config, None),
-        Err(e) => {
-            log::error!("[config] fallback to in-memory default: {}", e);
-            (default_config(), Some(e))
+        Err(error) => {
+            log::error!("[config] fallback to in-memory default: {}", error);
+            (default_config(), Some(error))
         }
     }
 }
 
 pub fn load_or_init() -> Result<AppConfig, String> {
-    let path = config_path()?;
+    let paths = PortablePaths::current()?;
+    paths.ensure_data_dirs()?;
+    let path = paths.config_file();
+    crate::paths::ensure_regular_file_or_missing(&path)?;
 
     if !path.exists() {
-        log::info!("[config] mimic.ini not found, writing default");
         let default = default_config();
-        save(&default)?;
+        save_to_path(&default, &path)?;
         return Ok(default);
     }
 
-    match load_from_ini(&path) {
-        Ok(mut config) => {
-            sanitize_config(&mut config);
+    let loaded = file_size_within_limit(&path)
+        .and_then(|()| load_from_ini(&path))
+        .and_then(|config| {
+            validate_config(&config)?;
             Ok(config)
-        }
-        Err(e) => {
+        });
+
+    match loaded {
+        Ok(config) => Ok(config),
+        Err(error) => {
             log::error!(
-                "[config] failed to parse INI, overwriting with default: {}",
-                e
+                "[config] invalid config, overwriting with embedded defaults: {}",
+                error
             );
             let default = default_config();
-            save(&default)?;
+            save_to_path(&default, &path)?;
             Ok(default)
         }
     }
 }
 
-fn load_from_ini(path: &PathBuf) -> Result<AppConfig, String> {
-    let ini = Ini::load_from_file(path).map_err(|e| format!("Failed to load INI file: {}", e))?;
+fn file_size_within_limit(path: &Path) -> Result<(), String> {
+    let size = std::fs::metadata(path)
+        .map_err(|error| format!("failed to read config metadata: {error}"))?
+        .len();
+    if size > MAX_CONFIG_FILE_BYTES {
+        Err(format!(
+            "config file size {size} exceeds {MAX_CONFIG_FILE_BYTES}"
+        ))
+    } else {
+        Ok(())
+    }
+}
 
+fn load_from_ini(path: &Path) -> Result<AppConfig, String> {
+    let ini =
+        Ini::load_from_file(path).map_err(|error| format!("failed to load INI file: {error}"))?;
+    decode_ini(&ini)
+}
+
+fn decode_ini(ini: &Ini) -> Result<AppConfig, String> {
     let hotkeys_section = ini
         .section(Some("hotkeys"))
-        .ok_or_else(|| "Missing [hotkeys] section".to_string())?;
+        .ok_or_else(|| "missing [hotkeys] section".to_string())?;
+    let start_label = required(hotkeys_section.get("start_label"), "start_label")?;
+    let start_scan_code = parse_u16(
+        required(hotkeys_section.get("start_scan_code"), "start_scan_code")?,
+        "start_scan_code",
+    )?;
+    let stop_label = required(hotkeys_section.get("stop_label"), "stop_label")?;
+    let stop_scan_code = parse_u16(
+        required(hotkeys_section.get("stop_scan_code"), "stop_scan_code")?,
+        "stop_scan_code",
+    )?;
 
-    let start_label = hotkeys_section
-        .get("start_label")
-        .ok_or_else(|| "Missing start_label".to_string())?;
-    let start_scan_code: u16 = hotkeys_section
-        .get("start_scan_code")
-        .ok_or_else(|| "Missing start_scan_code".to_string())?
-        .parse()
-        .map_err(|e| format!("Invalid start_scan_code: {}", e))?;
-
-    let stop_label = hotkeys_section
-        .get("stop_label")
-        .ok_or_else(|| "Missing stop_label".to_string())?;
-    let stop_scan_code: u16 = hotkeys_section
-        .get("stop_scan_code")
-        .ok_or_else(|| "Missing stop_scan_code".to_string())?
-        .parse()
-        .map_err(|e| format!("Invalid stop_scan_code: {}", e))?;
-
-    let hotkeys = HotkeyConfig {
-        start: CapturedKey {
-            key_label: start_label.to_string(),
-            scan_code: start_scan_code,
-        },
-        stop: CapturedKey {
-            key_label: stop_label.to_string(),
-            scan_code: stop_scan_code,
-        },
+    let keyboard_configs = parse_json_section(ini, "keyboard", "configs")?;
+    let mouse_configs = parse_json_section(ini, "mouse", "configs")?;
+    let custom_sequences = match ini
+        .section(Some("custom"))
+        .and_then(|section| section.get("sequences"))
+    {
+        Some(value) => serde_json::from_str(value)
+            .map_err(|error| format!("failed to parse custom sequences: {error}"))?,
+        None => Vec::new(),
     };
-
-    let keyboard_section = ini
-        .section(Some("keyboard"))
-        .ok_or_else(|| "Missing [keyboard] section".to_string())?;
-    let keyboard_configs_json = keyboard_section
-        .get("configs")
-        .ok_or_else(|| "Missing keyboard configs".to_string())?;
-    let keyboard_configs: Vec<KeyboardConfig> = serde_json::from_str(keyboard_configs_json)
-        .map_err(|e| format!("Failed to parse keyboard configs: {}", e))?;
-
-    let mouse_section = ini
-        .section(Some("mouse"))
-        .ok_or_else(|| "Missing [mouse] section".to_string())?;
-    let mouse_configs_json = mouse_section
-        .get("configs")
-        .ok_or_else(|| "Missing mouse configs".to_string())?;
-    let mouse_configs: Vec<MouseConfig> = serde_json::from_str(mouse_configs_json)
-        .map_err(|e| format!("Failed to parse mouse configs: {}", e))?;
-
-    // [custom] section 可选（旧配置文件无此段）→ 缺失时按空序列处理。
-    let custom_sequences: Vec<CustomSequence> =
-        match ini.section(Some("custom")).and_then(|s| s.get("sequences")) {
-            Some(json) => serde_json::from_str(json)
-                .map_err(|e| format!("Failed to parse custom sequences: {}", e))?,
-            None => Vec::new(),
-        };
+    let log_level = match ini
+        .section(Some("logging"))
+        .and_then(|section| section.get("level"))
+    {
+        Some(value) => LogLevel::from_ini_value(value)?,
+        None => LogLevel::default(),
+    };
 
     Ok(AppConfig {
         keyboard_configs,
         mouse_configs,
         custom_sequences,
-        hotkeys,
+        hotkeys: HotkeyConfig {
+            start: CapturedKey {
+                key_label: start_label.to_string(),
+                scan_code: start_scan_code,
+            },
+            stop: CapturedKey {
+                key_label: stop_label.to_string(),
+                scan_code: stop_scan_code,
+            },
+        },
+        log_level,
     })
 }
 
+fn required<'a>(value: Option<&'a str>, field: &str) -> Result<&'a str, String> {
+    value.ok_or_else(|| format!("missing {field}"))
+}
+
+fn parse_u16(value: &str, field: &str) -> Result<u16, String> {
+    value
+        .parse()
+        .map_err(|error| format!("invalid {field}: {error}"))
+}
+
+fn parse_json_section<T>(ini: &Ini, section: &str, key: &str) -> Result<T, String>
+where
+    T: for<'de> Deserialize<'de>,
+{
+    let value = ini
+        .section(Some(section))
+        .and_then(|section| section.get(key))
+        .ok_or_else(|| format!("missing [{section}] {key}"))?;
+    serde_json::from_str(value)
+        .map_err(|error| format!("failed to parse [{section}] {key}: {error}"))
+}
+
 pub fn save(config: &AppConfig) -> Result<(), String> {
-    let path = config_path()?;
-    let mut sanitized = config.clone();
-    sanitize_config(&mut sanitized);
+    let paths = PortablePaths::current()?;
+    paths.ensure_data_dirs()?;
+    save_to_path(config, &paths.config_file())
+}
+
+fn save_to_path(config: &AppConfig, path: &Path) -> Result<(), String> {
+    validate_config(config)?;
+    crate::paths::ensure_regular_file_or_missing(path)?;
 
     let mut ini = Ini::new();
-
     ini.with_section(Some("hotkeys"))
-        .set("start_label", &sanitized.hotkeys.start.key_label)
+        .set("start_label", &config.hotkeys.start.key_label)
         .set(
             "start_scan_code",
-            sanitized.hotkeys.start.scan_code.to_string(),
+            config.hotkeys.start.scan_code.to_string(),
         )
-        .set("stop_label", &sanitized.hotkeys.stop.key_label)
-        .set(
-            "stop_scan_code",
-            sanitized.hotkeys.stop.scan_code.to_string(),
-        );
+        .set("stop_label", &config.hotkeys.stop.key_label)
+        .set("stop_scan_code", config.hotkeys.stop.scan_code.to_string());
 
-    let keyboard_json = serde_json::to_string(&sanitized.keyboard_configs)
-        .map_err(|e| format!("Failed to serialize keyboard configs: {}", e))?;
+    let keyboard_json = serde_json::to_string(&config.keyboard_configs)
+        .map_err(|error| format!("failed to serialize keyboard configs: {error}"))?;
     ini.with_section(Some("keyboard"))
         .set("configs", keyboard_json);
 
-    let mouse_json = serde_json::to_string(&sanitized.mouse_configs)
-        .map_err(|e| format!("Failed to serialize mouse configs: {}", e))?;
+    let mouse_json = serde_json::to_string(&config.mouse_configs)
+        .map_err(|error| format!("failed to serialize mouse configs: {error}"))?;
     ini.with_section(Some("mouse")).set("configs", mouse_json);
 
-    let custom_json = serde_json::to_string(&sanitized.custom_sequences)
-        .map_err(|e| format!("Failed to serialize custom sequences: {}", e))?;
+    let custom_json = serde_json::to_string(&config.custom_sequences)
+        .map_err(|error| format!("failed to serialize custom sequences: {error}"))?;
     ini.with_section(Some("custom"))
         .set("sequences", custom_json);
+    ini.with_section(Some("logging"))
+        .set("level", config.log_level.as_ini_value());
 
-    let mut tmp_os = path.clone().into_os_string();
-    tmp_os.push(".tmp");
-    let tmp_path = PathBuf::from(tmp_os);
+    let (temporary, mut file) = create_temporary_file(path)?;
+    let write_result = (|| {
+        ini.write_to(&mut file)
+            .map_err(|error| format!("failed to write temporary config: {error}"))?;
+        file.sync_all()
+            .map_err(|error| format!("failed to flush temporary config: {error}"))?;
+        let size = file
+            .metadata()
+            .map_err(|error| format!("failed to read temporary config metadata: {error}"))?
+            .len();
+        if size > MAX_CONFIG_FILE_BYTES {
+            return Err(format!(
+                "config file size {size} exceeds {MAX_CONFIG_FILE_BYTES}"
+            ));
+        }
+        drop(file);
+        crate::paths::atomic_replace(&temporary, path)
+    })();
 
-    if let Err(e) = ini.write_to_file(&tmp_path) {
-        let _ = std::fs::remove_file(&tmp_path);
-        return Err(format!("Failed to write INI tmp file: {}", e));
+    if write_result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    write_result
+}
+
+fn create_temporary_file(path: &Path) -> Result<(PathBuf, std::fs::File), String> {
+    for _ in 0..16 {
+        let temporary = temporary_path(path);
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
+        {
+            Ok(file) => return Ok((temporary, file)),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(format!("failed to create temporary config: {error}")),
+        }
+    }
+    Err("failed to allocate unique temporary config".to_string())
+}
+
+fn temporary_path(path: &Path) -> PathBuf {
+    let counter = TEMP_FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let file_name = format!("mimic.ini.tmp-{}-{counter}", std::process::id());
+    path.with_file_name(file_name)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_config_is_valid() {
+        validate_config(&default_config()).unwrap();
     }
 
-    if let Err(e) = std::fs::rename(&tmp_path, &path) {
-        let _ = std::fs::remove_file(&tmp_path);
-        return Err(format!("Failed to atomically replace mimic.ini: {}", e));
+    #[test]
+    fn rejects_interval_outside_bounds() {
+        let mut config = default_config();
+        config.keyboard_configs[0].interval_ms = MIN_INTERVAL_MS - 1;
+        assert!(validate_config(&config).unwrap_err().contains("interval"));
+
+        config.keyboard_configs[0].interval_ms = MAX_INTERVAL_MS + 1;
+        assert!(validate_config(&config).unwrap_err().contains("interval"));
     }
 
-    Ok(())
+    #[test]
+    fn rejects_duplicate_ids_instead_of_rewriting_them() {
+        let mut config = default_config();
+        config
+            .keyboard_configs
+            .push(config.keyboard_configs[0].clone());
+        assert!(validate_config(&config).unwrap_err().contains("duplicate"));
+    }
+
+    #[test]
+    fn rejects_sequence_name_and_action_count_limits() {
+        let mut config = default_config();
+        config.custom_sequences.push(CustomSequence {
+            id: "sequence".to_string(),
+            name: "字".repeat(MAX_SEQUENCE_NAME_CHARS + 1),
+            actions: Vec::new(),
+        });
+        assert!(validate_config(&config).unwrap_err().contains("name"));
+
+        config.custom_sequences[0].name = "ok".to_string();
+        let action = CustomAction::Keyboard(config.keyboard_configs[0].clone());
+        config.custom_sequences[0].actions = vec![action; MAX_CUSTOM_ACTIONS + 1];
+        assert!(validate_config(&config).unwrap_err().contains("actions"));
+    }
+
+    #[test]
+    fn rejects_unsupported_mouse_action_types_during_decode() {
+        let encoded = r#"{
+            "id":"mouse", "enabled":true, "actionType":"drag",
+            "x":0, "y":0, "intervalMs":20
+        }"#;
+        assert!(serde_json::from_str::<MouseConfig>(encoded).is_err());
+    }
+
+    #[test]
+    fn rejects_independent_keyboard_hotkey_conflict() {
+        let mut config = default_config();
+        config.keyboard_configs[0].scan_code = config.hotkeys.start.scan_code;
+        assert!(validate_config(&config).unwrap_err().contains("conflicts"));
+    }
+
+    #[test]
+    fn deterministic_arbitrary_ini_inputs_never_panic() {
+        const ALPHABET: &[u8] =
+            b"[]=\n\r{}\\\":,abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 _-";
+
+        for seed in 0..512_u64 {
+            let mut state = seed.wrapping_add(0x9e37_79b9_7f4a_7c15);
+            let length = (next_random(&mut state) % 2_048) as usize;
+            let input: String = (0..length)
+                .map(|_| {
+                    let index = (next_random(&mut state) as usize) % ALPHABET.len();
+                    ALPHABET[index] as char
+                })
+                .collect();
+
+            if let Ok(ini) = Ini::load_from_str(&input) {
+                if let Ok(config) = decode_ini(&ini) {
+                    let _ = validate_config(&config);
+                }
+            }
+        }
+    }
+
+    fn next_random(state: &mut u64) -> u64 {
+        *state ^= *state << 13;
+        *state ^= *state >> 7;
+        *state ^= *state << 17;
+        *state
+    }
+
+    #[test]
+    fn config_transaction_serializes_writers() {
+        let first = transaction_guard().unwrap();
+        let (started_tx, started_rx) = std::sync::mpsc::sync_channel(1);
+        let (acquired_tx, acquired_rx) = std::sync::mpsc::sync_channel(1);
+        let join = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            let _second = transaction_guard().unwrap();
+            acquired_tx.send(()).unwrap();
+        });
+
+        started_rx.recv().unwrap();
+        assert!(acquired_rx
+            .recv_timeout(std::time::Duration::from_millis(25))
+            .is_err());
+        drop(first);
+        acquired_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap();
+        join.join().unwrap();
+    }
 }

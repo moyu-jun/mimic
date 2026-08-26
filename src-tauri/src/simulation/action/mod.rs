@@ -1,6 +1,6 @@
 // 统一动作定义 — ARCHITECTURE v3.0
 //
-// Action 是业务层抽象（键盘/鼠标动作），会被展开为原子 SimulationEvent 发送给 worker。
+// Action 是业务层抽象（键盘/鼠标动作），会被展开为 Runtime Actor 内部推进的原子 SimulationEvent。
 
 mod sequence;
 

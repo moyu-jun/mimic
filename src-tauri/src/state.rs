@@ -1,108 +1,308 @@
-// 全局状态管理 — DESIGN 9.2
-//
-// 本模块定义应用的全局状态结构，用于在 Tauri 命令间共享运行时信息。
-// 状态包括当前页面、配置、运行状态、驱动状态和停止标记。
+//! 应用状态投影与服务句柄。
+//!
+//! Navigation、Activity、SimulationMode 和 RuntimeHealth 是事实来源；RuntimeStatus 仅是
+//! 对前端兼容的派生 DTO，不再参与后端状态控制。
 
 use serde::{Deserialize, Serialize};
-use std::sync::atomic::AtomicBool;
-use std::sync::mpsc::SyncSender;
 use std::sync::{Arc, Mutex};
 
 use crate::config::AppConfig;
 
-// 为 Interception 创建 Send + Sync 包装器
-// SAFETY: Interception 内部封装的是 Windows 内核 HANDLE（DeviceIoControl 句柄）。
-// Windows 内核对象在内核层面是线程安全的，可在线程间传递；但 interception crate 上层
-// 的 Rust 状态（如 buffer、filter 设置）不是内部同步的，因此调用方必须自行串行化访问。
-// 本项目所有 SendInterception 实例均通过 Arc<Mutex<Option<SendInterception>>> 持有，
-// 由 Mutex 保证同一时刻只有一个线程在调用其方法（wait/receive/send）。
-//
-// 维护提示：如未来要去掉外层 Mutex，必须先核实 interception crate 当前版本的
-// 内部状态是否已变为线程安全；否则会引入数据竞争 UB。
-pub struct SendInterception(pub interception::Interception);
-unsafe impl Send for SendInterception {}
-unsafe impl Sync for SendInterception {}
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum PageId {
+    Home,
+    Keyboard,
+    Mouse,
+    Custom,
+    Settings,
+}
 
-/// 运行状态机 — DESIGN 9.2
-///
-/// serde 默认将无字段枚举序列化为其名字字符串（如 "RunningKeyboard"），
-/// 正好匹配前端的 PascalCase 联合类型，无需额外 rename。
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub enum RuntimeStatus {
-    /// 待机
+impl TryFrom<&str> for PageId {
+    type Error = String;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "home" => Ok(Self::Home),
+            "keyboard" => Ok(Self::Keyboard),
+            "mouse" => Ok(Self::Mouse),
+            "custom" => Ok(Self::Custom),
+            "settings" => Ok(Self::Settings),
+            _ => Err(format!("invalid page: {value}")),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Activity {
     Idle,
-    /// 当前处于按键模拟页面，可启动按键模拟
-    ReadyKeyboard,
-    /// 当前处于鼠标模拟页面，可启动鼠标模拟
-    ReadyMouse,
-    /// 按键模拟运行中
-    RunningKeyboard,
-    /// 鼠标模拟运行中
-    RunningMouse,
-    /// 当前处于自定义序列详情页，可启动该序列模拟
-    ReadyCustom,
-    /// 自定义序列模拟运行中
-    RunningCustom,
-    /// 正在拾取鼠标坐标
-    PickingMouse,
-    /// 正在录制提示音（阶段 18）
+    Simulating,
     Recording,
-    /// 驱动或配置错误
+    PickingMouse,
+    DriverMaintenance,
+    PersistingConfig,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SimulationMode {
+    Keyboard,
+    Mouse,
+    Custom,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RuntimeHealth {
+    Healthy,
+    Degraded { capability: &'static str },
+    Error { code: &'static str },
+}
+
+/// 前端兼容状态 DTO。只能通过 `AppState::runtime_status()` 派生。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum RuntimeStatus {
+    Idle,
+    ReadyKeyboard,
+    ReadyMouse,
+    RunningKeyboard,
+    RunningMouse,
+    ReadyCustom,
+    RunningCustom,
+    PickingMouse,
+    Recording,
     Error,
 }
 
-/// 驱动状态 — DESIGN 9.2
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum DriverStatus {
-    /// 驱动未安装
     NotInstalled,
-    /// 驱动已安装但需要重启系统
     InstalledNeedReboot,
-    /// 驱动已加载，可以使用
     Ready,
-    /// 驱动错误
     Error,
 }
 
-/// 应用全局状态 — DESIGN 9.2
-///
-/// 阶段 9 增加 `config_warning`：启动时若 INI 写盘失败，此字段记录原因，
-/// 前端可通过 `get_init_warning` 命令读取并在首页展示小字提示。
-/// 其余字段在阶段 10-13 接入真实功能后逐步使用，当前先 allow(dead_code)。
-#[allow(dead_code)]
 pub struct AppState {
-    /// 当前配置（从 INI 加载或默认）
     pub config: AppConfig,
-    /// 启动时配置写盘失败的原因；None 表示无问题
     pub config_warning: Option<String>,
-    /// 当前页面（用于判断热键是否可触发）
-    pub current_page: String,
-    /// 运行状态机
-    pub runtime_status: RuntimeStatus,
-    /// 驱动状态
+    pub navigation: PageId,
+    pub activity: Activity,
+    pub simulation_mode: Option<SimulationMode>,
+    pub runtime_health: RuntimeHealth,
     pub driver_status: DriverStatus,
-    /// 停止标记，供 worker 线程检查
-    pub stop_flag: Arc<AtomicBool>,
-    /// 当前坐标拾取的目标行 ID；Some 表示拾取进行中（PickingMouse 状态下由 listener 读取）
-    pub pick_row_id: Option<String>,
-    /// 当前激活的自定义序列 ID；Some 表示处于某序列详情页，热键启动作用于该序列。
-    /// 列表页为 None → 热键无效（CustomSequenceBuilder 找不到序列返回 None）。
+    pub pick_session: Option<crate::mouse_picker::PickSession>,
+    pub next_pick_token: u64,
+    pub picker_timeout: Option<crate::mouse_picker::PickerTimeoutHandle>,
     pub active_custom_sequence_id: Option<String>,
-    /// 监听专用 context（设置 filter + 阻塞 wait）
-    pub interception_listener: Arc<Mutex<Option<SendInterception>>>,
-    /// 模拟专用 context（仅 send，非阻塞）
-    pub interception_worker: Arc<Mutex<Option<SendInterception>>>,
-    /// 统一模拟事件发送器 — ARCHITECTURE v2.0
-    /// 键盘/鼠标统一走此 channel，由 simulation_worker 消费。
-    pub event_tx: SyncSender<crate::simulation::event::SimulationEvent>,
-    /// 提示音录制句柄（阶段 18）— Some 表示录制进行中，由录制线程管理
+    pub runtime: Option<crate::runtime::RuntimeHandle>,
     pub recording: crate::sound_recorder::RecordingHandle,
-    /// 录制完成待剪裁的 PCM 缓冲（阶段 18 剪裁）— (samples, sampleRate)
     pub recording_buffer: RecordingBuffer,
 }
 
-/// PCM 录制缓冲类型：(samples, sampleRate)
-pub type RecordingBuffer = Arc<Mutex<Option<(Vec<i16>, u32)>>>;
+impl AppState {
+    pub fn runtime_status(&self) -> RuntimeStatus {
+        if matches!(self.runtime_health, RuntimeHealth::Error { .. }) {
+            return RuntimeStatus::Error;
+        }
+        match self.activity {
+            Activity::Simulating => match self.simulation_mode {
+                Some(SimulationMode::Keyboard) => RuntimeStatus::RunningKeyboard,
+                Some(SimulationMode::Mouse) => RuntimeStatus::RunningMouse,
+                Some(SimulationMode::Custom) => RuntimeStatus::RunningCustom,
+                None => RuntimeStatus::Error,
+            },
+            Activity::Recording => RuntimeStatus::Recording,
+            Activity::PickingMouse => RuntimeStatus::PickingMouse,
+            Activity::DriverMaintenance => RuntimeStatus::Idle,
+            Activity::Idle | Activity::PersistingConfig => match self.navigation {
+                PageId::Keyboard => RuntimeStatus::ReadyKeyboard,
+                PageId::Mouse => RuntimeStatus::ReadyMouse,
+                PageId::Custom if self.active_custom_sequence_id.is_some() => {
+                    RuntimeStatus::ReadyCustom
+                }
+                _ => RuntimeStatus::Idle,
+            },
+        }
+    }
 
-/// 共享状态类型（Arc + Mutex 包装）
+    pub fn acquire_activity(&mut self, activity: Activity) -> Result<(), String> {
+        if !matches!(self.activity, Activity::Idle) {
+            return Err(format!("busy: {:?} is active", self.activity));
+        }
+        if !matches!(
+            activity,
+            Activity::DriverMaintenance | Activity::PersistingConfig
+        ) && matches!(self.runtime_health, RuntimeHealth::Error { .. })
+        {
+            return Err("runtime is in error state".to_string());
+        }
+        self.activity = activity;
+        Ok(())
+    }
+
+    pub fn release_activity(&mut self, expected: Activity) {
+        if self.activity == expected {
+            self.activity = Activity::Idle;
+            if expected == Activity::Simulating {
+                self.simulation_mode = None;
+            }
+        }
+    }
+}
+
+impl Drop for AppState {
+    fn drop(&mut self) {
+        if let Some(runtime) = &self.runtime {
+            let _ = runtime.shutdown();
+        }
+    }
+}
+
+pub type RecordingBuffer = Arc<Mutex<Option<(Vec<i16>, u32)>>>;
 pub type SharedState = Arc<Mutex<AppState>>;
+
+/// 对跨函数局部活动提供异常安全的自动释放。
+pub struct ActivityLease {
+    state: std::sync::Weak<Mutex<AppState>>,
+    activity: Activity,
+    armed: bool,
+}
+
+impl ActivityLease {
+    pub fn acquire(state: &SharedState, activity: Activity) -> Result<Self, String> {
+        state
+            .lock()
+            .map_err(|error| format!("Failed to lock state: {error}"))?
+            .acquire_activity(activity)?;
+        Ok(Self {
+            state: Arc::downgrade(state),
+            activity,
+            armed: true,
+        })
+    }
+
+    fn release_inner(&mut self) {
+        if !self.armed {
+            return;
+        }
+        self.armed = false;
+        if let Some(state) = self.state.upgrade() {
+            if let Ok(mut state) = state.lock() {
+                state.release_activity(self.activity);
+            }
+        }
+    }
+}
+
+impl Drop for ActivityLease {
+    fn drop(&mut self) {
+        self.release_inner();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn custom_list_and_detail_have_distinct_legacy_status() {
+        let mut state = test_state();
+        state.navigation = PageId::Custom;
+        assert_eq!(state.runtime_status(), RuntimeStatus::Idle);
+        state.active_custom_sequence_id = Some("sequence".to_string());
+        assert_eq!(state.runtime_status(), RuntimeStatus::ReadyCustom);
+    }
+
+    #[test]
+    fn activity_matrix_rejects_every_second_activity() {
+        for first in [
+            Activity::Simulating,
+            Activity::Recording,
+            Activity::PickingMouse,
+            Activity::DriverMaintenance,
+            Activity::PersistingConfig,
+        ] {
+            let mut state = test_state();
+            state.acquire_activity(first).unwrap();
+            for second in [
+                Activity::Simulating,
+                Activity::Recording,
+                Activity::PickingMouse,
+                Activity::DriverMaintenance,
+                Activity::PersistingConfig,
+            ] {
+                assert!(state.acquire_activity(second).is_err());
+            }
+            state.release_activity(first);
+            assert_eq!(state.activity, Activity::Idle);
+        }
+    }
+
+    #[test]
+    fn generated_activity_sequences_preserve_single_owner_invariant() {
+        let activities = [
+            Activity::Simulating,
+            Activity::Recording,
+            Activity::PickingMouse,
+            Activity::DriverMaintenance,
+            Activity::PersistingConfig,
+        ];
+
+        for seed in 0..256_u64 {
+            let state = Arc::new(Mutex::new(test_state()));
+            let mut lease: Option<ActivityLease> = None;
+            let mut random = seed.wrapping_add(0xd1b5_4a32_d192_ed03);
+
+            for _ in 0..256 {
+                random ^= random << 13;
+                random ^= random >> 7;
+                random ^= random << 17;
+                let activity = activities[(random as usize) % activities.len()];
+
+                if random & 1 == 0 {
+                    if lease.is_none() {
+                        lease = Some(ActivityLease::acquire(&state, activity).unwrap());
+                    } else {
+                        assert!(ActivityLease::acquire(&state, activity).is_err());
+                    }
+                } else {
+                    drop(lease.take());
+                }
+
+                let current = state.lock().unwrap().activity;
+                assert_eq!(
+                    current == Activity::Idle,
+                    lease.is_none(),
+                    "activity ownership diverged for seed {seed}"
+                );
+            }
+            drop(lease);
+            assert_eq!(state.lock().unwrap().activity, Activity::Idle);
+        }
+    }
+
+    #[test]
+    fn activity_lease_releases_on_drop() {
+        let state = Arc::new(Mutex::new(test_state()));
+        let lease = ActivityLease::acquire(&state, Activity::Recording).unwrap();
+        assert_eq!(state.lock().unwrap().activity, Activity::Recording);
+        drop(lease);
+        assert_eq!(state.lock().unwrap().activity, Activity::Idle);
+    }
+    fn test_state() -> AppState {
+        AppState {
+            config: crate::config::default_config(),
+            config_warning: None,
+            navigation: PageId::Home,
+            activity: Activity::Idle,
+            simulation_mode: None,
+            runtime_health: RuntimeHealth::Healthy,
+            driver_status: DriverStatus::Ready,
+            pick_session: None,
+            next_pick_token: 1,
+            picker_timeout: None,
+            active_custom_sequence_id: None,
+            runtime: None,
+            recording: crate::sound_recorder::new_handle(),
+            recording_buffer: Arc::new(Mutex::new(None)),
+        }
+    }
+}

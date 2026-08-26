@@ -1,46 +1,36 @@
-// 全局热键注册与管理 — DESIGN 6 / DESIGN 8.3 / 阶段 13
-//
-// 阶段 13：热键配置管理，实际监听由 listener 模块处理。
+//! Global hotkey configuration. Interception listener reads the committed snapshot.
 
 use crate::config::{self, HotkeyConfig};
-use crate::state::SharedState;
+use crate::state::{Activity, ActivityLease, SharedState};
 use log::{error, info};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
-/// 热键更新结果 — DESIGN 6.2
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HotkeyUpdateResult {
-    /// 与已持久化配置对比是否有变化
     pub changed: bool,
-    /// 新热键注册是否成功
     pub registered: bool,
-    /// 是否成功写入 mimic.ini
     pub persisted: bool,
-    /// 可选错误消息
     pub message: Option<String>,
 }
 
-/// 更新热键配置 — DESIGN 6.2 / 阶段 13
-///
-/// 流程：对比变化 → 校验冲突 → 持久化 → 更新内存。
-/// Interception 热键由后台监听线程统一处理，不需要注册/注销。
+/// Validate and commit a new hotkey snapshot without holding AppState during disk I/O.
 pub fn update_hotkeys(
     state: &SharedState,
     new_hotkeys: HotkeyConfig,
 ) -> Result<HotkeyUpdateResult, String> {
-    let old_hotkeys = {
-        let app_state = state
-            .lock()
-            .map_err(|e| format!("Failed to lock state: {}", e))?;
-        app_state.config.hotkeys.clone()
-    };
+    let _transaction = config::transaction_guard()?;
+    let _activity = ActivityLease::acquire(state, Activity::PersistingConfig)?;
+    let mut candidate = state
+        .lock()
+        .map_err(|error| format!("Failed to lock state: {error}"))?
+        .config
+        .clone();
 
-    // 对比变化
+    let old_hotkeys = &candidate.hotkeys;
     let changed = old_hotkeys.start.scan_code != new_hotkeys.start.scan_code
         || old_hotkeys.stop.scan_code != new_hotkeys.stop.scan_code;
-
     if !changed {
         return Ok(HotkeyUpdateResult {
             changed: false,
@@ -50,19 +40,11 @@ pub fn update_hotkeys(
         });
     }
 
-    // 热键与按键列表冲突校验 — DESIGN 15.6 反馈 Q6
-    let keyboard_scan_codes: HashSet<u16> = {
-        let app_state = state
-            .lock()
-            .map_err(|e| format!("Failed to lock state: {}", e))?;
-        app_state
-            .config
-            .keyboard_configs
-            .iter()
-            .map(|c| c.scan_code)
-            .collect()
-    };
-
+    let keyboard_scan_codes: HashSet<u16> = candidate
+        .keyboard_configs
+        .iter()
+        .map(|config| config.scan_code)
+        .collect();
     if keyboard_scan_codes.contains(&new_hotkeys.start.scan_code) {
         return Ok(HotkeyUpdateResult {
             changed: true,
@@ -74,7 +56,6 @@ pub fn update_hotkeys(
             )),
         });
     }
-
     if keyboard_scan_codes.contains(&new_hotkeys.stop.scan_code) {
         return Ok(HotkeyUpdateResult {
             changed: true,
@@ -87,38 +68,25 @@ pub fn update_hotkeys(
         });
     }
 
-    // 持久化配置
-    let mut full_config = {
-        let app_state = state
-            .lock()
-            .map_err(|e| format!("Failed to lock state: {}", e))?;
-        app_state.config.clone()
-    };
-    full_config.hotkeys = new_hotkeys.clone();
-
-    if let Err(e) = config::save(&full_config) {
-        error!("[hotkeys] persist failed: {}", e);
+    candidate.hotkeys = new_hotkeys.clone();
+    if let Err(error) = config::save(&candidate) {
+        error!("[hotkeys] persist failed: {}", error);
         return Ok(HotkeyUpdateResult {
             changed: true,
             registered: true,
             persisted: false,
-            message: Some(format!("配置持久化失败: {}", e)),
+            message: Some(format!("配置持久化失败: {error}")),
         });
     }
-
-    // 更新内存
-    {
-        let mut app_state = state
-            .lock()
-            .map_err(|e| format!("Failed to lock state: {}", e))?;
-        app_state.config.hotkeys = new_hotkeys.clone();
-    }
+    state
+        .lock()
+        .map_err(|error| format!("Failed to lock state: {error}"))?
+        .config = candidate;
 
     info!(
         "[hotkeys] updated: start={}, stop={}",
         new_hotkeys.start.key_label, new_hotkeys.stop.key_label
     );
-
     Ok(HotkeyUpdateResult {
         changed: true,
         registered: true,

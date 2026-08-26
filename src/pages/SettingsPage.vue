@@ -11,8 +11,10 @@ import { ref, onMounted, onBeforeUnmount, computed, nextTick } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import { appStore } from '../stores/appStore'
+import { markCurrentConfigPersisted } from '../lib/configUtil'
+import { commandError, commandErrorMessage } from '../lib/errorUtil'
 import KeyCaptureInput from '../components/KeyCaptureInput.vue'
-import type { CapturedKey, HotkeyConfig, HotkeyUpdateResult } from '../types/config'
+import type { CapturedKey, HotkeyConfig, HotkeyUpdateResult, LogLevel } from '../types/config'
 
 /** 已持久化快照（用于保存时对比是否真的变更） */
 const persistedSnapshot = ref<HotkeyConfig>(cloneHotkeys(appStore.hotkeys))
@@ -26,6 +28,28 @@ const saveMessage = ref<string | null>(null)
 /** 提示文本是否为警告（橙色） */
 const isWarning = ref(false)
 let messageTimer: number | null = null
+const persistedLogLevel = ref<LogLevel>(appStore.logLevel)
+const logLevelSaving = ref(false)
+const logLevelMessage = ref<string | null>(null)
+
+async function onLogLevelChange(): Promise<void> {
+  const previous = persistedLogLevel.value
+  const next = appStore.logLevel
+  logLevelSaving.value = true
+  logLevelMessage.value = null
+  try {
+    await invoke('update_log_level', { level: next })
+    persistedLogLevel.value = next
+    markCurrentConfigPersisted()
+    logLevelMessage.value = '已生效'
+  } catch (error) {
+    appStore.logLevel = previous
+    logLevelMessage.value = '修改失败'
+    console.error('Failed to update log level:', error)
+  } finally {
+    logLevelSaving.value = false
+  }
+}
 
 const isDirty = computed(() => {
   if (!startKey.value || !stopKey.value) return false
@@ -96,9 +120,10 @@ async function onSave(): Promise<void> {
       stop: cloneKey(stopKey.value),
     }
     persistedSnapshot.value = cloneHotkeys(appStore.hotkeys)
+    markCurrentConfigPersisted()
     showMessage('已保存', false)
   } catch (err) {
-    const errorMsg = err instanceof Error ? err.message : String(err)
+    const errorMsg = commandErrorMessage(err)
     showMessage(`保存失败: ${errorMsg}`, false)
     console.error('Failed to update hotkeys:', err)
   }
@@ -259,12 +284,12 @@ async function onStartRecord(): Promise<void> {
     startWaveLoop()
   } catch (err) {
     isRecording.value = false
-    const msg = err instanceof Error ? err.message : String(err)
-    if (msg.includes('no_input_device')) {
+    const detail = commandError(err)
+    if (detail.code === 'no_input_device') {
       micUnavailable.value = true
       showRecMessage('未检测到麦克风', true)
     } else {
-      showRecMessage(`录制失败: ${msg}`, true)
+      showRecMessage(`录制失败: ${detail.message}`, true)
     }
     console.error('start_recording failed:', err)
   }
@@ -605,7 +630,7 @@ onMounted(() => {
         <button
           type="button"
           class="save-btn"
-          :disabled="!isDirty"
+          :disabled="!isDirty || isRecording"
           @click="onSave"
         >
           保存
@@ -613,9 +638,28 @@ onMounted(() => {
       </footer>
     </div>
 
+<header class="page-header section-gap">
+      <h2 class="page-title">日志记录</h2>
+      <p class="page-desc">日志写入 data/logs，修改后立即生效；生产环境默认仅记录错误。</p>
+    </header>
+
+    <div class="form">
+      <div class="form-row">
+        <label class="form-label" for="log-level">日志等级</label>
+        <span class="log-control">
+          <span v-if="logLevelMessage" class="save-msg">{{ logLevelMessage }}</span>
+          <select id="log-level" v-model="appStore.logLevel" class="log-select" :disabled="logLevelSaving || isRecording" @change="onLogLevelChange">
+            <option value="error">错误</option>
+            <option value="warn">警告</option>
+            <option value="info">信息</option>
+            <option value="debug">调试</option>
+          </select>
+        </span>
+      </div>
+    </div>
     <header class="page-header section-gap">
       <h2 class="page-title">提示音</h2>
-      <p class="page-desc">录制人声覆盖 exe 同级的 按键开启 / 按键关闭 .wav（最长 5 秒）。</p>
+      <p class="page-desc">录制人声覆盖 data/audio 中的 按键开启 / 按键关闭 .wav（最长 5 秒）。</p>
     </header>
 
     <div class="form sound-form">
@@ -844,6 +888,22 @@ onMounted(() => {
 .save-btn:disabled {
   opacity: 0.4;
   cursor: not-allowed;
+}
+
+.log-control {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.log-select {
+  width: 140px;
+  height: 30px;
+  padding: 0 10px;
+  color: var(--text-primary);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-color);
+  border-radius: 5px;
 }
 
 /* ===== 提示音录制 ===== */

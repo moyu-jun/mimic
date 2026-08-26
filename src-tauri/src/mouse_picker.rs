@@ -1,139 +1,313 @@
-// 鼠标坐标拾取 — DESIGN 11.2 / TASKS 阶段 14
-//
-// 拾取机制（2026-06-10 第二次修订：复用热键监听 context）：
-//   - 历史方案 A：WH_MOUSE_LL 用户态 hook —— 被独占全屏游戏绕过，失效。
-//   - 历史方案 B：worker context 单独 wait/receive 鼠标 —— 同进程双 context
-//     竞争同一设备事件分发，worker context 从未设过 filter，实际收不到鼠标事件。
-//   - 当前方案 C：复用「热键监听线程」的 listener context。该 context 已被证明
-//     能正常 receive（键盘热键工作正常）。listener 启动时同时设键盘 + 鼠标左键 filter，
-//     平时鼠标左键透传（零影响），仅在 PickingMouse 状态下捕获坐标。
-//     单 context 是 Interception 标准用法，避免多 context 未定义行为，全屏游戏同样有效。
-//
-// 流程：
-//   - start_pick_mouse_position 命令：置 PickingMouse、记录 row_id、隐藏窗口（不开线程）。
-//   - listener 线程在 wait 循环中收到鼠标左键按下，若处于 PickingMouse：
-//     用 GetCursorPos 读屏幕坐标 → 透传点击 → 调 finish_pick 恢复窗口 + emit。
-//
-// 坐标说明：Interception 鼠标 stroke 的 x/y 是移动量而非屏幕坐标，故用 GetCursorPos
-// 读取系统光标位置作为拾取结果（单显示器 / 标准 DPI）。
+//! 鼠标坐标拾取会话。
+//!
+//! 每次拾取拥有唯一 token、原 Ready 状态和受管 30 秒超时；完成、取消、失败都只能
+//! 结束匹配 token 的会话，旧回调不能污染新拾取。
 
-use crate::state::{RuntimeStatus, SharedState};
+use crate::state::{Activity, RuntimeStatus, SharedState};
+use std::sync::mpsc::{self, RecvTimeoutError, SyncSender};
+use std::sync::{Arc, Mutex};
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager};
 
-/// 拾取入口 — 置 PickingMouse + 记录 row_id + 隐藏窗口。
-///
-/// 实际坐标捕获由热键监听线程在 PickingMouse 状态下完成（见 finish_pick）。
+const PICK_TIMEOUT: Duration = Duration::from_secs(30);
+
+#[derive(Debug, Clone)]
+pub struct PickSession {
+    token: u64,
+    row_id: String,
+    restore_status: RuntimeStatus,
+}
+
+enum TimeoutCommand {
+    Arm { token: u64, timeout: Duration },
+    Cancel { token: u64 },
+    Shutdown,
+}
+
+struct PickerTimeoutInner {
+    command_tx: SyncSender<TimeoutCommand>,
+    join: Mutex<Option<JoinHandle<()>>>,
+}
+
+impl Drop for PickerTimeoutInner {
+    fn drop(&mut self) {
+        let _ = self.command_tx.send(TimeoutCommand::Shutdown);
+        if let Ok(join) = self.join.get_mut() {
+            if let Some(join) = join.take() {
+                let _ = join.join();
+            }
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct PickerTimeoutHandle {
+    inner: Arc<PickerTimeoutInner>,
+}
+
+impl PickerTimeoutHandle {
+    pub fn spawn<F>(on_timeout: F) -> Result<Self, String>
+    where
+        F: Fn(u64) + Send + 'static,
+    {
+        let (command_tx, command_rx) = mpsc::sync_channel(4);
+        let join = thread::Builder::new()
+            .name("mimic-picker-timeout".to_string())
+            .spawn(move || {
+                let mut armed: Option<(u64, Instant)> = None;
+                loop {
+                    let command = match armed {
+                        Some((token, deadline)) => {
+                            let remaining = deadline.saturating_duration_since(Instant::now());
+                            match command_rx.recv_timeout(remaining) {
+                                Ok(command) => command,
+                                Err(RecvTimeoutError::Timeout) => {
+                                    armed = None;
+                                    on_timeout(token);
+                                    continue;
+                                }
+                                Err(RecvTimeoutError::Disconnected) => return,
+                            }
+                        }
+                        None => match command_rx.recv() {
+                            Ok(command) => command,
+                            Err(_) => return,
+                        },
+                    };
+
+                    match command {
+                        TimeoutCommand::Arm { token, timeout } => {
+                            armed = Some((token, Instant::now() + timeout));
+                        }
+                        TimeoutCommand::Cancel { token } => {
+                            if armed.map(|current| current.0) == Some(token) {
+                                armed = None;
+                            }
+                        }
+                        TimeoutCommand::Shutdown => return,
+                    }
+                }
+            })
+            .map_err(|error| format!("failed to start picker timeout service: {error}"))?;
+
+        Ok(Self {
+            inner: Arc::new(PickerTimeoutInner {
+                command_tx,
+                join: Mutex::new(Some(join)),
+            }),
+        })
+    }
+
+    fn arm(&self, token: u64) -> Result<(), String> {
+        self.inner
+            .command_tx
+            .send(TimeoutCommand::Arm {
+                token,
+                timeout: PICK_TIMEOUT,
+            })
+            .map_err(|_| "picker timeout service unavailable".to_string())
+    }
+
+    fn cancel(&self, token: u64) {
+        let _ = self.inner.command_tx.send(TimeoutCommand::Cancel { token });
+    }
+}
+
 pub fn start_pick_mouse_position(
     app: AppHandle,
     state: SharedState,
     row_id: String,
 ) -> Result<(), String> {
-    log::info!("[mouse_picker] start picking for row {}", row_id);
-
-    // 1. 状态置 PickingMouse + 记录目标行
-    {
+    let (session, timeout) = {
         let mut app_state = state
             .lock()
-            .map_err(|e| format!("Failed to lock state: {}", e))?;
-        app_state.runtime_status = RuntimeStatus::PickingMouse;
-        app_state.pick_row_id = Some(row_id);
+            .map_err(|error| format!("Failed to lock state: {error}"))?;
+
+        let restore_status = match app_state.runtime_status() {
+            RuntimeStatus::ReadyMouse => RuntimeStatus::ReadyMouse,
+            RuntimeStatus::ReadyCustom => RuntimeStatus::ReadyCustom,
+            _ => return Err("mouse picking is only available from a ready page".to_string()),
+        };
+
+        let token = app_state.next_pick_token;
+        app_state.next_pick_token = app_state.next_pick_token.saturating_add(1);
+        let session = PickSession {
+            token,
+            row_id,
+            restore_status,
+        };
+        let timeout = app_state
+            .picker_timeout
+            .clone()
+            .ok_or_else(|| "picker timeout service unavailable".to_string())?;
+        app_state.acquire_activity(Activity::PickingMouse)?;
+        app_state.pick_session = Some(session.clone());
+        (session, timeout)
+    };
+
+    if let Err(error) = timeout.arm(session.token) {
+        rollback_unstarted_pick(&state, session.token);
+        return Err(error);
     }
+
     emit_status(&app, RuntimeStatus::PickingMouse);
-
-    // 2. 隐藏主窗口（best-effort：拿不到窗口时记录但不中断拾取）
-    if let Some(win) = app.get_webview_window("main") {
-        if let Err(e) = win.hide() {
-            log::warn!("[mouse_picker] failed to hide window: {}", e);
+    if let Some(window) = app.get_webview_window("main") {
+        if let Err(error) = window.hide() {
+            log::warn!("[mouse_picker] failed to hide window: {}", error);
         }
-    } else {
-        log::warn!("[mouse_picker] main window not found, picking without hiding");
     }
-
+    log::info!(
+        "[mouse_picker] session {} started for row {}",
+        session.token,
+        session.row_id
+    );
     Ok(())
 }
 
-/// 拾取完成处理 — 由 listener 线程在捕获到左键坐标后调用。
-///
-/// 恢复窗口、状态回 ReadyMouse / ReadyCustom（取决于拾取来源页）、
-/// 清除 pick_row_id、发送 mouse_position_picked。
 pub fn finish_pick(app: &AppHandle, state: &SharedState, x: i32, y: i32) {
-    // 拾取可能从鼠标页或自定义序列详情页发起；后者需恢复到 ReadyCustom 以保持热键门控。
-    let (row_id, restore_status) = {
-        let mut app_state = match state.lock() {
-            Ok(s) => s,
-            Err(e) => {
-                log::error!("[mouse_picker] finish_pick: failed to lock state: {}", e);
-                return;
-            }
-        };
-        let restore_status = if app_state.active_custom_sequence_id.is_some() {
-            RuntimeStatus::ReadyCustom
-        } else {
-            RuntimeStatus::ReadyMouse
-        };
-        app_state.runtime_status = restore_status.clone();
-        (app_state.pick_row_id.take(), restore_status)
+    let Some((session, timeout)) = take_session(state, None) else {
+        log::warn!("[mouse_picker] finish ignored: no active session");
+        return;
     };
+    timeout.cancel(session.token);
 
-    let row_id = match row_id {
-        Some(id) => id,
-        None => {
-            log::warn!("[mouse_picker] finish_pick called but pick_row_id is None");
-            restore_window_on_main(app);
-            emit_status(app, restore_status);
-            return;
-        }
-    };
-
-    log::info!("[mouse_picker] picked ({}, {}) for row {}", x, y, row_id);
     restore_window_on_main(app);
-    emit_status(app, restore_status);
-
-    if let Err(e) = app.emit(
+    emit_status(app, session.restore_status.clone());
+    if let Err(error) = app.emit(
         "mouse_position_picked",
-        serde_json::json!({ "rowId": row_id, "x": x, "y": y }),
+        serde_json::json!({ "rowId": session.row_id, "x": x, "y": y }),
     ) {
-        log::error!("[mouse_picker] failed to emit mouse_position_picked: {}", e);
+        log::error!("[mouse_picker] failed to emit result: {}", error);
     }
 }
 
-/// 发送 runtime_status_changed 事件。
+pub fn cancel_pick(app: &AppHandle, state: &SharedState, reason: &str) -> bool {
+    let Some((session, timeout)) = take_session(state, None) else {
+        return false;
+    };
+    timeout.cancel(session.token);
+    finish_cancel(app, session, reason, false);
+    true
+}
+
+pub fn fail_pick(app: &AppHandle, state: &SharedState, message: &str) {
+    let Some((session, timeout)) = take_session(state, None) else {
+        return;
+    };
+    timeout.cancel(session.token);
+    finish_cancel(app, session, message, true);
+}
+
+pub fn timeout_pick(app: &AppHandle, state: &SharedState, token: u64) {
+    let Some((session, _timeout)) = take_session(state, Some(token)) else {
+        return;
+    };
+    finish_cancel(app, session, "timeout", false);
+}
+
+fn take_session(
+    state: &SharedState,
+    expected_token: Option<u64>,
+) -> Option<(PickSession, PickerTimeoutHandle)> {
+    let mut app_state = state.lock().ok()?;
+    let session = app_state.pick_session.as_ref()?;
+    if expected_token.is_some() && expected_token != Some(session.token) {
+        return None;
+    }
+
+    let session = app_state.pick_session.take()?;
+    app_state.release_activity(Activity::PickingMouse);
+    let timeout = app_state.picker_timeout.clone()?;
+    Some((session, timeout))
+}
+
+fn rollback_unstarted_pick(state: &SharedState, token: u64) {
+    if let Ok(mut app_state) = state.lock() {
+        let matches = app_state.pick_session.as_ref().map(|session| session.token) == Some(token);
+        if matches && app_state.pick_session.take().is_some() {
+            app_state.release_activity(Activity::PickingMouse);
+        }
+    }
+}
+
+fn finish_cancel(app: &AppHandle, session: PickSession, reason: &str, failed: bool) {
+    restore_window_on_main(app);
+    emit_status(app, session.restore_status);
+    let event_name = if failed {
+        "mouse_pick_failed"
+    } else {
+        "mouse_pick_cancelled"
+    };
+    if let Err(error) = app.emit(
+        event_name,
+        serde_json::json!({ "rowId": session.row_id, "reason": reason }),
+    ) {
+        log::error!("[mouse_picker] failed to emit {}: {}", event_name, error);
+    }
+}
+
 fn emit_status(app: &AppHandle, status: RuntimeStatus) {
-    if let Err(e) = app.emit(
+    if let Err(error) = app.emit(
         "runtime_status_changed",
         serde_json::json!({ "status": status }),
     ) {
+        log::error!("[mouse_picker] failed to emit state: {}", error);
+    }
+}
+
+fn restore_window_on_main(app: &AppHandle) {
+    let app_clone = app.clone();
+    if let Err(error) = app.run_on_main_thread(move || match app_clone.get_webview_window("main") {
+        Some(window) => {
+            if let Err(error) = window.unminimize() {
+                log::warn!("[mouse_picker] unminimize failed: {}", error);
+            }
+            if let Err(error) = window.show() {
+                log::error!("[mouse_picker] window show failed: {}", error);
+            }
+            if let Err(error) = window.set_focus() {
+                log::warn!("[mouse_picker] focus failed: {}", error);
+            }
+        }
+        None => log::error!("[mouse_picker] main window not found during restore"),
+    }) {
         log::error!(
-            "[mouse_picker] failed to emit runtime_status_changed: {}",
-            e
+            "[mouse_picker] main-thread restore dispatch failed: {}",
+            error
         );
     }
 }
 
-/// 在主线程恢复并聚焦主窗口（show + unminimize + set_focus）。
-///
-/// 窗口在主线程创建，从后台线程直接 show()/set_focus() 受 Windows 前台锁定限制
-/// 不可靠，必须 marshal 回主线程执行。
-fn restore_window_on_main(app: &AppHandle) {
-    let app_clone = app.clone();
-    let dispatched = app.run_on_main_thread(move || match app_clone.get_webview_window("main") {
-        Some(win) => {
-            if let Err(e) = win.unminimize() {
-                log::warn!("[mouse_picker] unminimize failed: {}", e);
-            }
-            if let Err(e) = win.show() {
-                log::error!("[mouse_picker] window show failed: {}", e);
-            }
-            if let Err(e) = win.set_focus() {
-                log::warn!("[mouse_picker] set_focus failed: {}", e);
-            }
-            log::info!("[mouse_picker] window restored on main thread");
-        }
-        None => {
-            log::error!("[mouse_picker] main window not found during restore");
-        }
-    });
-    if let Err(e) = dispatched {
-        log::error!("[mouse_picker] run_on_main_thread dispatch failed: {}", e);
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn timeout_service_replaces_old_token_and_cancels_current() {
+        let (tx, rx) = mpsc::channel();
+        let handle = PickerTimeoutHandle::spawn(move |token| {
+            let _ = tx.send(token);
+        })
+        .unwrap();
+
+        handle
+            .inner
+            .command_tx
+            .send(TimeoutCommand::Arm {
+                token: 1,
+                timeout: Duration::from_millis(10),
+            })
+            .unwrap();
+        handle
+            .inner
+            .command_tx
+            .send(TimeoutCommand::Arm {
+                token: 2,
+                timeout: Duration::from_millis(10),
+            })
+            .unwrap();
+        handle.cancel(2);
+        assert!(rx.recv_timeout(Duration::from_millis(30)).is_err());
     }
 }

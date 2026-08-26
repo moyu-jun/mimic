@@ -37,7 +37,7 @@
 
 ### 2.1 关键前提
 
-执行层（`ActionSequence` = `Vec<ActionStep>`，`Action = Keyboard | Mouse | Delay`，`Scheduler::execute_loop`）**本就支持异构混合序列**，无需改动执行层。改动集中在：数据建模、builder、状态机/门控、持久化、UI。
+执行层以不可变 `ActionSequence`（`Vec<ActionStep>`）提交给单所有者 Runtime Actor；Actor 原生支持键盘与鼠标动作混排、可中断 Delay 和循环执行。自定义序列改动集中在数据建模、builder、状态门控、事务持久化和 UI，不建立第二套执行链路。
 
 ### 2.2 数据模型（判别联合 + 具名序列）
 
@@ -115,7 +115,7 @@ fn mouse_config_to_action(cfg: &MouseConfig) -> Option<Action>;  // 坐标全空
 
 ### 2.6 持久化
 
-`mimic.ini` 新增 `[custom]` section，`sequences = <JSON>`（`Vec<CustomSequence>` 序列化），方式同 keyboard/mouse。`sanitize_config`：每个序列 actions 做 interval clamp + 动作 id 去重；序列 id 去重。
+`data/mimic.ini` 使用 `[custom]` section，`sequences = <JSON>`（`Vec<CustomSequence>` 序列化），方式同 keyboard/mouse。后端严格拒绝越界 interval、重复/空 ID、超长名称、过量序列或动作，不再静默 clamp 或重写用户数据。保存采用候选快照、事务锁、独占临时文件和原子替换；写盘失败时后端内存与前端界面同时回滚。
 
 ### 2.7 UI
 
@@ -123,7 +123,7 @@ fn mouse_config_to_action(cfg: &MouseConfig) -> Option<Action>;  // 坐标全空
 - `appStore`：加 `customSequences: [] as CustomSequence[]`，及本地 UI 态 `customView: 'list' | 'detail'`、`activeSequenceId: string | null`（详情页路由用，不动全局 `AppPage`）。`App.vue` load_config 注入 `customSequences`。
 - `CustomPage.vue`（容器）：按 `customView` 渲染两个子视图：
   - **CustomListView**：首张固定 `+` 卡片 → 新建序列（自动默认名）+ 切 detail + `enter_custom_sequence`；其余卡片显示 `name`，点击进详情。
-  - **CustomDetailView**：顶部序列名可就地重命名 + 删除按钮；动作列表行内编辑（keyboard 行复用 `KeyCaptureInput`，mouse 行复用坐标拾取）；「+ 添加按键 / + 添加鼠标」；上移/下移；返回列表。`onMounted` 调 `enter_custom_sequence(id)`，离开调 `set_current_page('custom')`。
+  - **CustomDetailView**：顶部序列名可就地重命名；删除整个序列前显示确认框且不提供撤销；动作列表行内编辑（keyboard 行复用 `KeyCaptureInput`，mouse 行复用坐标拾取）；动作行在原类型标签位置显示启用开关；支持「+ 添加按键 / + 添加鼠标」、上移/下移和返回列表。新建、删除、重命名和动作编辑仅在持久化成功后提交界面。
 
 ## 3. 验证方式
 
@@ -140,12 +140,12 @@ fn mouse_config_to_action(cfg: &MouseConfig) -> Option<Action>;  // 坐标全空
 | 3 | AppState.active_custom_sequence_id + enter_custom_sequence 命令 | ✅ 完成 | state.rs + runtime_cmd.rs；lib.rs 注册命令 |
 | 4 | builder 抽函数 + CustomSequenceBuilder（按 active id） + 单测 | ✅ 完成 | 抽 keyboard/mouse_config_to_action 三 builder 共用；改为按 sequence_id 字段取序列（便于单测）；3 个新单测 |
 | 5 | 状态机 & 热键门控（RuntimeStatus / set_current_page / hotkey.rs） | ✅ 完成 | 新增 ReadyCustom/RunningCustom；hotkey 分派改按 RuntimeStatus；stop/pick/finish_pick 全部覆盖 |
-| 6 | 持久化（[custom] section + sanitize） | ✅ 完成 | save/load_from_ini + sanitize（clamp + 序列内动作 id 去重 + 序列 id 去重） |
+| 6 | 持久化（[custom] section + 严格校验 + 事务） | ✅ 完成 | 越界/重复直接拒绝；create-new 临时文件、sync、原子替换，失败不提交内存 |
 | 7 | 前端类型 + appStore + pages/MenuIcon | ✅ 完成 | types/config.ts、appStore（customView/activeSequenceId）、App.vue 注入、pages.ts、MenuIcon、AppStatusBar |
 | 8 | CustomPage 容器 + CustomListView（卡片列表 + 新建） | ✅ 完成 | 固定 + 卡片，自动默认名，进详情调 enter_custom_sequence |
-| 9 | CustomDetailView（行内编辑 + 排序 + 重命名 + 删除） | ✅ 完成 | 键盘/鼠标行按 kind 条件渲染，上移/下移，就地重命名，详情页内删除 |
-| 10 | 静态检查 | ✅ 完成 | cargo fmt/clippy(-D warnings)/test(10 passed) + npm run build 均通过 |
-| 11 | 实机验收 | ⏳ 待办 | 需装 Interception 驱动 + GUI 会话，见 §5 清单 |
+| 9 | CustomDetailView（行内编辑 + 排序 + 重命名 + 删除） | ✅ 完成 | 启用开关替代类型标签；整序列删除确认且不可撤销；写盘失败回滚并停留详情 |
+| 10 | 静态检查 | ✅ 完成 | 已纳入项目统一 fmt/check/clippy/test、前端 build 与 Release 门禁 |
+| 11 | 实机验收 | ⏳ 待办 | 需装 Interception 驱动 + GUI 会话，见 `5 清单 |
 
 ## 5. 实机验收清单（待人工执行）
 
@@ -158,6 +158,6 @@ fn mouse_config_to_action(cfg: &MouseConfig) -> Option<Action>;  // 坐标全空
 - [ ] **坐标拾取**：鼠标行「坐标拾取」→ 窗口隐藏 → 点击目标位 → 窗口恢复、坐标回填、状态回 ReadyCustom（而非 ReadyMouse）。
 - [ ] **停止后可再启动**：运行中按停止热键 → 回 ReadyCustom（仍在详情页），可再次启动。
 - [ ] **未勾选 / 空坐标跳过**：取消勾选某行或鼠标行坐标为空 → 该行被跳过；整个序列无有效动作则启动被静默忽略。
-- [ ] **删除序列**：详情页「删除序列」→ 回列表且卡片消失，mimic.ini 同步。
+- [ ] **删除序列**：详情页删除需二次确认；确认并持久化成功后回列表，失败时保留原序列并停留详情；不提供撤销。
 - [ ] **持久化往返**：重启应用 → 序列、动作、名称、顺序均保留（含旧版无 [custom] 段的 ini 能正常加载）。
 - [ ] **回归**：现有按键页 / 鼠标页功能不受影响。

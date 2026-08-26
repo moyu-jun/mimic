@@ -1,7 +1,7 @@
 // 坐标系转换 — ARCHITECTURE v2.0
 //
 // 负责屏幕坐标 → Interception 归一化坐标（0-65535）的转换。
-// 当前版本：单显示器 + 标准 DPI（沿用旧 mouse_worker 的转换逻辑）。
+// 当前版本：单显示器 + 标准 DPI（由 Runtime Actor 的驱动适配器使用）。
 
 /// 归一化坐标上限（Interception 绝对坐标范围 0-65535）
 const NORM_MAX: i64 = 65535;

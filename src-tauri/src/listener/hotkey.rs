@@ -1,148 +1,153 @@
-// 热键匹配 + 状态机门控 — ARCHITECTURE v3.0 阶段 C
-//
-// 由 hotkeys_interception.rs 拆分而来：处理单个键盘 stroke，
-// 命中启动/停止热键时按 current_page 选 builder 调 SimulationRunner，否则透传。
+//! 全局热键路由。
+//!
+//! 监听线程只做匹配、去抖和输入处置，启动/停止生命周期统一交给 SimulationRunner。
 
 use crate::runner::{
     CustomSequenceBuilder, KeyboardSequenceBuilder, MouseSequenceBuilder, SimulationRunner,
+    StartOutcome,
 };
-use crate::state::{RuntimeStatus, SharedState};
+use crate::state::{PageId, RuntimeStatus, SharedState};
 use interception::{Interception, KeyState, ScanCode, Stroke};
 use log::{error, info};
-use tauri::AppHandle;
+use std::collections::HashSet;
+use tauri::{AppHandle, Emitter};
 
-/// 处理单个键盘 stroke — 热键匹配 + 状态机门控。
+#[derive(Default)]
+pub struct HotkeyDebouncer {
+    consumed_down: HashSet<u16>,
+}
+
+impl HotkeyDebouncer {
+    fn is_repeat(&self, scan_code: u16) -> bool {
+        self.consumed_down.contains(&scan_code)
+    }
+
+    fn mark_consumed(&mut self, scan_code: u16) {
+        self.consumed_down.insert(scan_code);
+    }
+
+    fn release(&mut self, scan_code: u16) {
+        self.consumed_down.remove(&scan_code);
+    }
+}
+
+/// 处理单个键盘 stroke。
 ///
-/// 命中启动/停止热键则调用 SimulationRunner 并阻断事件；其余情况透传到系统。
+/// 真正生效的首次 KeyDown 被消费；重复 KeyDown 被忽略，直到对应 KeyUp 清除去抖状态。
+/// 状态不匹配或启动被忽略时继续透传。
 pub fn handle_keyboard_stroke(
     app: &AppHandle,
     state: &SharedState,
     interception: &Interception,
     device: i32,
     stroke: &Stroke,
+    debouncer: &mut HotkeyDebouncer,
 ) {
     let (code, key_state) = match stroke {
         Stroke::Keyboard {
-            code, state: ks, ..
-        } => (code, ks),
+            code,
+            state: key_state,
+            ..
+        } => (*code as u16, key_state),
         _ => {
-            // 非键盘事件（理论上不会到达这里），透传
-            interception.send(device, &[*stroke]);
+            pass_through(interception, device, stroke);
             return;
         }
     };
 
-    // 仅处理按下事件（忽略抬起）— DESIGN 8.3
     if key_state.contains(KeyState::UP) {
-        interception.send(device, &[*stroke]);
+        debouncer.release(code);
+        pass_through(interception, device, stroke);
         return;
     }
 
-    // 读取当前热键配置
+    if code == ScanCode::Esc as u16 {
+        let picking = state
+            .lock()
+            .map(|app_state| app_state.runtime_status() == RuntimeStatus::PickingMouse)
+            .unwrap_or(false);
+        if picking {
+            crate::mouse_picker::cancel_pick(app, state, "user");
+            return;
+        }
+    }
+
     let (start_scan_code, stop_scan_code, current_page, runtime_status, active_custom_id) = {
         let app_state = match state.lock() {
-            Ok(s) => s,
-            Err(e) => {
-                error!("[listener] failed to lock state: {}", e);
-                interception.send(device, &[*stroke]);
+            Ok(state) => state,
+            Err(error) => {
+                error!("[listener] failed to lock state: {}", error);
+                pass_through(interception, device, stroke);
                 return;
             }
         };
         (
             app_state.config.hotkeys.start.scan_code,
             app_state.config.hotkeys.stop.scan_code,
-            app_state.current_page.clone(),
-            app_state.runtime_status.clone(),
+            app_state.navigation,
+            app_state.runtime_status(),
             app_state.active_custom_sequence_id.clone(),
         )
     };
 
-    // 统一热键匹配逻辑 — 支持启动和停止键相同的 toggle 场景
-    let is_start_key = *code as u16 == start_scan_code;
-    let is_stop_key = *code as u16 == stop_scan_code;
-
+    let is_start_key = code == start_scan_code;
+    let is_stop_key = code == stop_scan_code;
     if !is_start_key && !is_stop_key {
-        // 非热键事件，透传到系统
-        interception.send(device, &[*stroke]);
+        pass_through(interception, device, stroke);
         return;
     }
 
-    // 诊断日志 — 热键匹配成功时记录上下文
-    info!(
-        "[listener] hotkey matched: code={}, start_code={}, stop_code={}, page={}, status={:?}",
-        *code as u16, start_scan_code, stop_scan_code, current_page, runtime_status
-    );
-
-    // 页面过滤 — REQUIREMENTS 3.6
-    // custom 页仅在详情子页（runtime_status == ReadyCustom/RunningCustom）才可触发；
-    // 卡片列表页虽也是 current_page=="custom" 但状态为 Idle，会被下方状态机门控挡下。
-    if current_page.as_str() != "keyboard"
-        && current_page.as_str() != "mouse"
-        && current_page.as_str() != "custom"
-    {
-        info!(
-            "[listener] hotkey blocked by page filter: current_page={}",
-            current_page
-        );
-        interception.send(device, &[*stroke]);
+    if debouncer.is_repeat(code) {
+        info!("[listener] ignored repeated KeyDown for hotkey {}", code);
         return;
     }
 
-    // 状态机门控：根据当前状态决定行为（支持 toggle）
-    match runtime_status {
-        RuntimeStatus::Idle
-        | RuntimeStatus::ReadyKeyboard
-        | RuntimeStatus::ReadyMouse
-        | RuntimeStatus::ReadyCustom
+    if !matches!(
+        current_page,
+        PageId::Keyboard | PageId::Mouse | PageId::Custom
+    ) {
+        pass_through(interception, device, stroke);
+        return;
+    }
+
+    let consumed = match runtime_status {
+        RuntimeStatus::ReadyKeyboard | RuntimeStatus::ReadyMouse | RuntimeStatus::ReadyCustom
             if is_start_key =>
         {
-            // Idle/Ready* 状态下按启动键 → 启动模拟
-            // 注意：列表页为 Idle + current_page=="custom"，handle_start_hotkey 会因无 builder 分支
-            // 落到 keyboard 序列 → 但 ReadyCustom 才由 CustomSequenceBuilder 处理，见下。
-            info!("[listener] state machine: START branch matched");
-            handle_start_hotkey(app, state, &runtime_status, active_custom_id.as_deref());
-            // 阻断热键事件，不透传到系统
+            handle_start_hotkey(app, state, &runtime_status, active_custom_id.as_deref())
         }
         RuntimeStatus::RunningKeyboard
         | RuntimeStatus::RunningMouse
         | RuntimeStatus::RunningCustom
             if is_stop_key =>
         {
-            // Running 状态下按停止键 → 停止模拟
-            info!("[listener] state machine: STOP branch matched");
-            SimulationRunner::stop(app, state);
-            // 阻断热键事件
+            match SimulationRunner::stop(app, state) {
+                Ok(crate::runtime::StopOutcome::Stopped) => true,
+                Ok(crate::runtime::StopOutcome::AlreadyIdle) => false,
+                Err(error) => {
+                    // 停止请求已经进入 Runtime；释放失败会进入 Error，仍应消费本次停止热键。
+                    error!("[listener] stop failed: {}", error);
+                    true
+                }
+            }
         }
-        RuntimeStatus::Idle if is_stop_key => {
-            // Idle 状态下按停止键 → 阻断（不透传）
-            info!("[listener] state machine: IDLE+STOP branch, ignoring");
-        }
-        _ => {
-            // 状态不匹配（如 Running 时按启动键），透传
-            info!(
-                "[listener] state machine: FALLTHROUGH branch, passing through. is_start_key={}, is_stop_key={}",
-                is_start_key, is_stop_key
-            );
-            interception.send(device, &[*stroke]);
-        }
+        _ => false,
+    };
+
+    if consumed {
+        debouncer.mark_consumed(code);
+    } else {
+        pass_through(interception, device, stroke);
     }
 }
 
-/// 启动热键回调 — 按 Ready* 状态选 SequenceBuilder，交由 SimulationRunner 统一编排。
-///
-/// 按状态而非页面分派：ReadyCustom 才走 CustomSequenceBuilder；custom 列表页为 Idle → 无分支 → 静默忽略
-/// （对应「列表页热键无效」的需求）。
 fn handle_start_hotkey(
     app: &AppHandle,
     state: &SharedState,
     runtime_status: &RuntimeStatus,
     active_custom_id: Option<&str>,
-) {
-    info!(
-        "[listener] handle_start_hotkey called: status={:?}",
-        runtime_status
-    );
-    match runtime_status {
+) -> bool {
+    let result = match runtime_status {
         RuntimeStatus::ReadyKeyboard => {
             SimulationRunner::start(app, state, &KeyboardSequenceBuilder)
         }
@@ -155,20 +160,61 @@ fn handle_start_hotkey(
                     sequence_id: id.to_string(),
                 },
             ),
-            None => info!("[listener] ReadyCustom but no active sequence id, ignored"),
+            None => return false,
         },
-        _ => {
-            // Idle（含 custom 列表页）等其它状态：无有效启动目标，忽略。
-            info!("[listener] handle_start_hotkey: no builder for status, ignored");
+        _ => return false,
+    };
+
+    match result {
+        Ok(StartOutcome::Started) => true,
+        Ok(StartOutcome::NoExecutableActions) => false,
+        Err(error) => {
+            error!("[listener] start failed: {}", error);
+            let _ = app.emit(
+                "simulation_start_failed",
+                serde_json::json!({ "error": error }),
+            );
+            false
         }
     }
 }
 
-/// 分配一个键盘 stroke 缓冲区（供监听循环 receive 使用）。
+fn pass_through(interception: &Interception, device: i32, stroke: &Stroke) {
+    let sent = interception.send(device, &[*stroke]);
+    if sent != 1 {
+        error!("[listener] keyboard pass-through failed: sent={sent}");
+    }
+}
+
 pub fn keyboard_stroke_buffer() -> [Stroke; 16] {
     [Stroke::Keyboard {
         code: ScanCode::Esc,
         state: KeyState::empty(),
         information: 0,
     }; 16]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::HotkeyDebouncer;
+
+    #[test]
+    fn consumed_key_repeats_until_key_up() {
+        let mut debouncer = HotkeyDebouncer::default();
+        assert!(!debouncer.is_repeat(88));
+
+        debouncer.mark_consumed(88);
+        assert!(debouncer.is_repeat(88));
+
+        debouncer.release(88);
+        assert!(!debouncer.is_repeat(88));
+    }
+
+    #[test]
+    fn releasing_other_key_does_not_clear_consumed_key() {
+        let mut debouncer = HotkeyDebouncer::default();
+        debouncer.mark_consumed(88);
+        debouncer.release(87);
+        assert!(debouncer.is_repeat(88));
+    }
 }

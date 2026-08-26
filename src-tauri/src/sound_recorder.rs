@@ -1,19 +1,20 @@
 // 提示音录制 — DESIGN 20 / 阶段 18
 //
 // 用 cpal 采集系统默认麦克风，累积 i16/mono PCM 到内存缓冲，停止时用 hound
-// 写入 WAV 并原子覆盖 exe 同级 audio 目录下的 `按键开启.wav` / `按键关闭.wav`。
+// 写入 WAV 并覆盖 exe 同级 data/audio 目录下的 `按键开启.wav` / `按键关闭.wav`。
 //
 // 线程模型：cpal 的 Stream 是 !Send，无法跨命令存放，因此由一个专用录制线程
 // 创建并持有 Stream，命令通过 channel 发停止/取消信号；音频缓冲与最新峰值经
 // Arc<Mutex<>> 共享。波形幅度由录制线程按 ~30fps 经事件推送，避免在音频回调里
 // 直接 emit。
 
-use crate::state::{RuntimeStatus, SharedState};
+use crate::state::{ActivityLease, RuntimeStatus, SharedState};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::SampleFormat;
 use log::{error, info};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle;
 use std::time::Duration;
 use tauri::{AppHandle, Emitter};
 
@@ -21,6 +22,7 @@ use tauri::{AppHandle, Emitter};
 const MAX_DURATION_SECS: u32 = 5;
 /// 波形 / 自动停止检查间隔（约 30fps）
 const TICK_MS: u64 = 33;
+static AUDIO_TEMP_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 /// 录制线程控制信号
 pub enum RecCtrl {
@@ -36,13 +38,53 @@ struct RecBuf {
     latest_peak: f32,
 }
 
-/// 当前是否有录制进行中 — 持有控制信号发送端；None 表示空闲。
-/// 录制线程结束时（停止 / 取消 / 超时）由线程自身清空。
-pub type RecordingHandle = Arc<Mutex<Option<Sender<RecCtrl>>>>;
+struct RecordingTask {
+    token: u64,
+    control: Option<Sender<RecCtrl>>,
+    join: Option<JoinHandle<()>>,
+    finished: bool,
+    activity_lease: Option<ActivityLease>,
+}
 
-/// 创建空闲录制句柄（在 setup 中初始化并存入 AppState）
+struct RecordingController {
+    next_token: u64,
+    active: Option<RecordingTask>,
+}
+
+struct RecordingHandleInner {
+    controller: Mutex<RecordingController>,
+}
+
+impl Drop for RecordingHandleInner {
+    fn drop(&mut self) {
+        let Ok(controller) = self.controller.get_mut() else {
+            return;
+        };
+        if let Some(mut task) = controller.active.take() {
+            if let Some(control) = task.control.take() {
+                let _ = control.send(RecCtrl::Cancel);
+            }
+            if let Some(join) = task.join.take() {
+                let _ = join.join();
+            }
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct RecordingHandle {
+    inner: Arc<RecordingHandleInner>,
+}
+
 pub fn new_handle() -> RecordingHandle {
-    Arc::new(Mutex::new(None))
+    RecordingHandle {
+        inner: Arc::new(RecordingHandleInner {
+            controller: Mutex::new(RecordingController {
+                next_token: 1,
+                active: None,
+            }),
+        }),
+    }
 }
 
 /// 开始录制 — DESIGN 20.5
@@ -53,116 +95,166 @@ pub fn start_recording(
     app: AppHandle,
     state: SharedState,
     handle: RecordingHandle,
+    activity_lease: ActivityLease,
     target: String,
 ) -> Result<(), String> {
-    let file_name = match target.as_str() {
-        "start" => "按键开启.wav",
-        "stop" => "按键关闭.wav",
-        _ => return Err("invalid target".to_string()),
-    };
-
-    // 已有录制进行中 → 拒绝
-    {
-        let h = handle.lock().map_err(|e| format!("lock handle: {}", e))?;
-        if h.is_some() {
-            return Err("recording already in progress".to_string());
-        }
+    if !matches!(target.as_str(), "start" | "stop") {
+        return Err("invalid target".to_string());
     }
 
-    // 设备可用性检查（Stream 在线程内构建，这里仅探测默认输入设备是否存在）
+    // 回收上一轮已完成线程；活动线程则拒绝重复启动。
+    let previous_join = {
+        let mut controller = handle
+            .inner
+            .controller
+            .lock()
+            .map_err(|error| format!("lock recording controller: {error}"))?;
+        match controller.active.as_ref() {
+            Some(task) if !task.finished => {
+                return Err("recording already in progress".to_string());
+            }
+            Some(_) => controller
+                .active
+                .take()
+                .and_then(|mut task| task.join.take()),
+            None => None,
+        }
+    };
+    if let Some(join) = previous_join {
+        join.join()
+            .map_err(|_| "previous recording thread panicked".to_string())?;
+    }
+
     let host = cpal::default_host();
     let device = host
         .default_input_device()
         .ok_or_else(|| "no_input_device".to_string())?;
-    let default_cfg = device
+    let default_config = device
         .default_input_config()
-        .map_err(|e| format!("default_input_config: {}", e))?;
-
-    let sample_rate = default_cfg.sample_rate().0;
-    let channels = default_cfg.channels() as usize;
-    let sample_format = default_cfg.sample_format();
-    let config: cpal::StreamConfig = default_cfg.into();
+        .map_err(|error| format!("default_input_config: {error}"))?;
+    let sample_rate = default_config.sample_rate().0;
+    let channels = default_config.channels() as usize;
+    let sample_format = default_config.sample_format();
+    if !(8_000..=192_000).contains(&sample_rate) || !(1..=8).contains(&channels) {
+        return Err("unsupported_input_format".to_string());
+    }
+    let config: cpal::StreamConfig = default_config.into();
 
     info!(
         "[recorder] start target={} rate={} ch={} fmt={:?}",
         target, sample_rate, channels, sample_format
     );
 
-    let (ctrl_tx, ctrl_rx) = std::sync::mpsc::channel::<RecCtrl>();
-    let buf = Arc::new(Mutex::new(RecBuf {
+    let token = {
+        let mut controller = handle
+            .inner
+            .controller
+            .lock()
+            .map_err(|error| format!("lock recording controller: {error}"))?;
+        let token = controller.next_token;
+        controller.next_token = controller.next_token.saturating_add(1);
+        token
+    };
+    let (control_tx, control_rx) = std::sync::mpsc::channel::<RecCtrl>();
+    let (start_tx, start_rx) = std::sync::mpsc::sync_channel(1);
+    let buffer = Arc::new(Mutex::new(RecBuf {
         samples: Vec::with_capacity((sample_rate * MAX_DURATION_SECS) as usize),
         latest_peak: 0.0,
     }));
+    let worker_handle = Arc::downgrade(&handle.inner);
+    let join = std::thread::Builder::new()
+        .name(format!("mimic-recorder-{token}"))
+        .spawn(move || {
+            if start_rx.recv().is_err() {
+                return;
+            }
+            run_recording_thread(
+                app,
+                state,
+                worker_handle,
+                token,
+                buffer,
+                control_rx,
+                device,
+                config,
+                sample_format,
+                channels,
+                sample_rate,
+                target,
+            );
+        })
+        .map_err(|error| format!("failed to spawn recording thread: {error}"))?;
 
-    // 标记录制进行中
     {
-        let mut h = handle.lock().map_err(|e| format!("lock handle: {}", e))?;
-        *h = Some(ctrl_tx);
+        let mut controller = handle
+            .inner
+            .controller
+            .lock()
+            .map_err(|error| format!("lock recording controller: {error}"))?;
+        controller.active = Some(RecordingTask {
+            token,
+            control: Some(control_tx),
+            join: Some(join),
+            finished: false,
+            activity_lease: Some(activity_lease),
+        });
     }
-    {
-        let mut s = state.lock().map_err(|e| format!("lock state: {}", e))?;
-        s.runtime_status = RuntimeStatus::Recording;
+    if start_tx.send(()).is_err() {
+        let failed_task = {
+            let mut controller = handle
+                .inner
+                .controller
+                .lock()
+                .map_err(|error| format!("lock recording controller: {error}"))?;
+            if controller.active.as_ref().map(|task| task.token) == Some(token) {
+                controller.active.take()
+            } else {
+                None
+            }
+        };
+        if let Some(mut task) = failed_task {
+            task.control.take();
+            if let Some(join) = task.join.take() {
+                let _ = join.join();
+            }
+        }
+        return Err("recording thread failed before startup".to_string());
     }
-    let _ = app.emit(
-        "runtime_status_changed",
-        serde_json::json!({ "status": RuntimeStatus::Recording }),
-    );
-
-    // 录制线程：构建并持有 Stream，循环检查信号 / 超时 / 推送波形
-    let exe_dir = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|d| d.to_path_buf()));
-
-    std::thread::spawn(move || {
-        run_recording_thread(
-            app,
-            state,
-            handle,
-            buf,
-            ctrl_rx,
-            device,
-            config,
-            sample_format,
-            channels,
-            sample_rate,
-            target,
-            file_name,
-            exe_dir,
-        );
-    });
-
     Ok(())
 }
 
 /// 停止录制（保存）— 仅发信号，结果经 recording_finished 事件返回。
 pub fn stop_recording(handle: &RecordingHandle) -> Result<(), String> {
-    let h = handle.lock().map_err(|e| format!("lock handle: {}", e))?;
-    match h.as_ref() {
-        Some(tx) => {
-            let _ = tx.send(RecCtrl::Stop);
-            Ok(())
-        }
-        None => Err("no recording in progress".to_string()),
-    }
+    send_control(handle, RecCtrl::Stop)
 }
 
-/// 取消录制（不写文件）
+/// 取消录制（不写文件）。
 pub fn cancel_recording(handle: &RecordingHandle) -> Result<(), String> {
-    let h = handle.lock().map_err(|e| format!("lock handle: {}", e))?;
-    match h.as_ref() {
-        Some(tx) => {
-            let _ = tx.send(RecCtrl::Cancel);
-            Ok(())
-        }
-        None => Err("no recording in progress".to_string()),
-    }
+    send_control(handle, RecCtrl::Cancel)
 }
 
+fn send_control(handle: &RecordingHandle, command: RecCtrl) -> Result<(), String> {
+    let controller = handle
+        .inner
+        .controller
+        .lock()
+        .map_err(|error| format!("lock recording controller: {error}"))?;
+    let control = controller
+        .active
+        .as_ref()
+        .filter(|task| !task.finished)
+        .and_then(|task| task.control.as_ref())
+        .ok_or_else(|| "no recording in progress".to_string())?;
+    control
+        .send(command)
+        .map_err(|_| "recording worker unavailable".to_string())
+}
 #[allow(clippy::too_many_arguments)]
 fn run_recording_thread(
     app: AppHandle,
     state: SharedState,
-    handle: RecordingHandle,
+    handle: std::sync::Weak<RecordingHandleInner>,
+    token: u64,
     buf: Arc<Mutex<RecBuf>>,
     ctrl_rx: Receiver<RecCtrl>,
     device: cpal::Device,
@@ -171,22 +263,20 @@ fn run_recording_thread(
     channels: usize,
     sample_rate: u32,
     target: String,
-    _file_name: &str,
-    _exe_dir: Option<std::path::PathBuf>,
 ) {
     // 构建输入流（回调内降为 mono i16 累积 + 记录峰值）
     let stream = match build_input_stream(&device, &config, sample_format, channels, buf.clone()) {
         Ok(s) => s,
         Err(e) => {
             error!("[recorder] build stream failed: {}", e);
-            finish_idle(&app, &state, &handle);
+            finish_idle(&app, &state, &handle, token);
             let _ = app.emit("recording_error", serde_json::json!({ "error": e }));
             return;
         }
     };
     if let Err(e) = stream.play() {
         error!("[recorder] stream.play failed: {}", e);
-        finish_idle(&app, &state, &handle);
+        finish_idle(&app, &state, &handle, token);
         let _ = app.emit(
             "recording_error",
             serde_json::json!({ "error": format!("play: {}", e) }),
@@ -239,15 +329,13 @@ fn run_recording_thread(
         0
     };
 
-    // 先恢复状态 + 清空句柄，避免后续操作长时间占用
-    finish_idle(&app, &state, &handle);
-
     if cancelled {
         info!("[recorder] cancelled, no buffer retained");
         let _ = app.emit(
             "recording_finished",
             serde_json::json!({ "target": target, "cancelled": true, "durationMs": duration_ms }),
         );
+        finish_idle(&app, &state, &handle, token);
         return;
     }
 
@@ -267,7 +355,7 @@ fn run_recording_thread(
         }
     }
 
-    // 推送完整数据到前端进入剪裁态
+    // 推送完整数据到前端进入剪裁态。
     let _ = app.emit(
         "recording_finished",
         serde_json::json!({
@@ -278,6 +366,9 @@ fn run_recording_thread(
             "sampleRate": sample_rate,
         }),
     );
+
+    // 数据和完成事件均已发布后才释放活动租约，防止新录音与旧任务尾部交叠。
+    finish_idle(&app, &state, &handle, token);
 }
 
 /// 将 i16 PCM 数组编码为 base64（用于前端 Web Audio）。
@@ -336,18 +427,21 @@ pub fn save_trimmed_audio(
     // 写前停止正在播放的提示音以释放文件句柄
     crate::sound::purge_playing();
 
-    let dir = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
-        .ok_or_else(|| "no exe dir".to_string())?;
-    let audio_dir = dir.join("audio");
-    let final_path = audio_dir.join(file_name);
+    let paths = crate::paths::PortablePaths::current()?;
+    paths.ensure_data_dirs()?;
+    let final_path = paths.audio_dir().join(file_name);
+    crate::paths::ensure_regular_file_or_missing(&final_path)?;
 
-    write_wav(&final_path, trimmed, sample_rate)?;
-    info!("[recorder] trimmed audio saved to {}", final_path.display());
-
-    // 写盘成功后刷新内存常驻缓存 — DESIGN 18.4
-    crate::sound::reload_cache(file_name);
+    let temporary = write_wav_candidate(trimmed, sample_rate)?;
+    let commit_result = crate::sound::commit_wav(file_name, &temporary, &final_path);
+    if commit_result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    commit_result?;
+    info!(
+        "[recorder] trimmed audio and memory cache committed to {}",
+        final_path.display()
+    );
 
     // 清空缓冲
     if let Ok(s) = state.lock() {
@@ -360,30 +454,36 @@ pub fn save_trimmed_audio(
 }
 
 /// 恢复运行状态到页面就绪态并清空录制句柄。
-fn finish_idle(app: &AppHandle, state: &SharedState, handle: &RecordingHandle) {
-    if let Ok(mut h) = handle.lock() {
-        *h = None;
-    }
-    let new_status = {
-        match state.lock() {
-            Ok(mut s) => {
-                // 录制仅在设置页发起，恢复为 Idle（设置页非可触发模拟页）
-                s.runtime_status = match s.current_page.as_str() {
-                    "keyboard" => RuntimeStatus::ReadyKeyboard,
-                    "mouse" => RuntimeStatus::ReadyMouse,
-                    _ => RuntimeStatus::Idle,
-                };
-                s.runtime_status.clone()
-            }
-            Err(_) => RuntimeStatus::Idle,
-        }
+fn finish_idle(
+    app: &AppHandle,
+    state: &SharedState,
+    handle: &std::sync::Weak<RecordingHandleInner>,
+    token: u64,
+) {
+    let lease = handle.upgrade().and_then(|handle| {
+        let mut controller = handle.controller.lock().ok()?;
+        let task = controller.active.as_mut()?;
+        (task.token == token).then(|| {
+            task.control = None;
+            task.finished = true;
+            task.activity_lease.take()
+        })?
+    });
+    let Some(lease) = lease else {
+        return;
+    };
+
+    // 先释放活动租约，再读取派生状态；陈旧 token 无法释放新会话。
+    drop(lease);
+    let new_status = match state.lock() {
+        Ok(state) => state.runtime_status(),
+        Err(_) => RuntimeStatus::Idle,
     };
     let _ = app.emit(
         "runtime_status_changed",
         serde_json::json!({ "status": new_status }),
     );
 }
-
 /// 构建 cpal 输入流，回调内降为 mono i16 累积并记录峰值。
 fn build_input_stream(
     device: &cpal::Device,
@@ -432,33 +532,67 @@ fn build_input_stream(
     }
 }
 
-/// 写 16-bit mono PCM WAV：先写 .tmp 再原子 rename。
-fn write_wav(
-    final_path: &std::path::Path,
-    samples: &[i16],
-    sample_rate: u32,
-) -> Result<(), String> {
-    let tmp_path = final_path.with_extension("wav.tmp");
-    let spec = hound::WavSpec {
-        channels: 1,
-        sample_rate,
-        bits_per_sample: 16,
-        sample_format: hound::SampleFormat::Int,
-    };
+/// 将 16-bit mono PCM WAV 写入并同步到 data/temp，返回待提交候选文件。
+fn write_wav_candidate(samples: &[i16], sample_rate: u32) -> Result<std::path::PathBuf, String> {
+    if !(8_000..=192_000).contains(&sample_rate)
+        || samples.len() > sample_rate as usize * MAX_DURATION_SECS as usize
     {
-        let mut writer =
-            hound::WavWriter::create(&tmp_path, spec).map_err(|e| format!("create wav: {}", e))?;
-        for &s in samples {
-            writer
-                .write_sample(s)
-                .map_err(|e| format!("write sample: {}", e))?;
-        }
-        writer.finalize().map_err(|e| format!("finalize: {}", e))?;
+        return Err("invalid audio bounds".to_string());
     }
-    std::fs::rename(&tmp_path, final_path).map_err(|e| {
-        // rename 失败时清理临时文件
-        let _ = std::fs::remove_file(&tmp_path);
-        format!("rename: {}", e)
-    })?;
-    Ok(())
+
+    let paths = crate::paths::PortablePaths::current()?;
+    paths.ensure_data_dirs()?;
+    let counter = AUDIO_TEMP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let temporary = paths
+        .temp_dir()
+        .join(format!("audio-{}-{counter}.wav", std::process::id()));
+    let result = (|| {
+        let specification = hound::WavSpec {
+            channels: 1,
+            sample_rate,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
+            .map_err(|error| format!("create wav: {error}"))?;
+        let mut writer = hound::WavWriter::new(file, specification)
+            .map_err(|error| format!("initialize wav: {error}"))?;
+        for sample in samples {
+            writer
+                .write_sample(*sample)
+                .map_err(|error| format!("write sample: {error}"))?;
+        }
+        writer
+            .finalize()
+            .map_err(|error| format!("finalize wav: {error}"))?;
+
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&temporary)
+            .map_err(|error| format!("reopen wav: {error}"))?;
+        file.sync_all()
+            .map_err(|error| format!("flush wav: {error}"))?;
+        let reader =
+            hound::WavReader::open(&temporary).map_err(|error| format!("validate wav: {error}"))?;
+        let spec = reader.spec();
+        if spec.channels != 1
+            || spec.sample_rate != sample_rate
+            || spec.bits_per_sample != 16
+            || spec.sample_format != hound::SampleFormat::Int
+            || reader.duration() as usize != samples.len()
+        {
+            return Err("written wav validation failed".to_string());
+        }
+        drop(reader);
+        Ok(temporary.clone())
+    })();
+
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    result
 }

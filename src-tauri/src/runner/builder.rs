@@ -5,11 +5,11 @@
 // 新增模式 = 新增一个 builder，监听层与 runner 完全不用改。
 
 use crate::config::{AppConfig, CustomAction, KeyboardConfig, MouseActionType, MouseConfig};
+use crate::runtime::RuntimeMode;
 use crate::simulation::action::{Action, ActionSequence};
 use crate::simulation::event::MouseButton;
 use crate::simulation::keyboard::KeyAction;
 use crate::simulation::mouse::MouseAction;
-use crate::state::RuntimeStatus;
 
 /// 配置 → 统一 ActionSequence 的可插拔转换器。
 pub trait SequenceBuilder {
@@ -17,8 +17,12 @@ pub trait SequenceBuilder {
     /// （对应鼠标「坐标全空则忽略」、键盘「无勾选则不启动」的语义）。
     fn build(&self, config: &AppConfig) -> Option<ActionSequence>;
 
+    fn validate_start(&self, _config: &AppConfig) -> Result<(), String> {
+        Ok(())
+    }
+
     /// 该模式对应的运行态（受前端字符串契约约束）。
-    fn running_status(&self) -> RuntimeStatus;
+    fn mode(&self) -> RuntimeMode;
 }
 
 /// KeyboardConfig → Action（仅支持 Press 操作）。供键盘/自定义 builder 共用。
@@ -35,39 +39,21 @@ fn mouse_config_to_action(cfg: &MouseConfig) -> Option<Action> {
         _ => return None,
     };
     let action = match cfg.action_type {
-        MouseActionType::ClickLeft => Action::Mouse(MouseAction::Click {
+        MouseActionType::Left => Action::Mouse(MouseAction::Click {
             button: MouseButton::Left,
             x,
             y,
         }),
-        MouseActionType::ClickRight => Action::Mouse(MouseAction::Click {
+        MouseActionType::Right => Action::Mouse(MouseAction::Click {
             button: MouseButton::Right,
             x,
             y,
         }),
-        MouseActionType::ClickMiddle => Action::Mouse(MouseAction::Click {
+        MouseActionType::Middle => Action::Mouse(MouseAction::Click {
             button: MouseButton::Middle,
             x,
             y,
         }),
-        MouseActionType::ScrollUp => Action::Mouse(MouseAction::Scroll {
-            delta: cfg.scroll_delta.unwrap_or(1),
-        }),
-        MouseActionType::ScrollDown => Action::Mouse(MouseAction::Scroll {
-            delta: -cfg.scroll_delta.unwrap_or(1),
-        }),
-        MouseActionType::Drag => {
-            let from = (x, y);
-            let to = (
-                cfg.drag_to_x.unwrap_or(from.0),
-                cfg.drag_to_y.unwrap_or(from.1),
-            );
-            Action::Mouse(MouseAction::Drag {
-                button: MouseButton::Left,
-                from,
-                to,
-            })
-        }
     };
     Some(action)
 }
@@ -89,8 +75,8 @@ impl SequenceBuilder for KeyboardSequenceBuilder {
         }
     }
 
-    fn running_status(&self) -> RuntimeStatus {
-        RuntimeStatus::RunningKeyboard
+    fn mode(&self) -> RuntimeMode {
+        RuntimeMode::Keyboard
     }
 }
 
@@ -113,8 +99,8 @@ impl SequenceBuilder for MouseSequenceBuilder {
         }
     }
 
-    fn running_status(&self) -> RuntimeStatus {
-        RuntimeStatus::RunningMouse
+    fn mode(&self) -> RuntimeMode {
+        RuntimeMode::Mouse
     }
 }
 
@@ -206,8 +192,27 @@ impl SequenceBuilder for CustomSequenceBuilder {
         }
     }
 
-    fn running_status(&self) -> RuntimeStatus {
-        RuntimeStatus::RunningCustom
+    fn validate_start(&self, config: &AppConfig) -> Result<(), String> {
+        let sequence = config
+            .custom_sequences
+            .iter()
+            .find(|sequence| sequence.id == self.sequence_id)
+            .ok_or_else(|| "custom_sequence_not_found".to_string())?;
+        for (index, action) in sequence.actions.iter().enumerate() {
+            if let CustomAction::Keyboard(keyboard) = action {
+                if keyboard.enabled
+                    && (keyboard.scan_code == config.hotkeys.start.scan_code
+                        || keyboard.scan_code == config.hotkeys.stop.scan_code)
+                {
+                    return Err(format!("hotkey_conflict:{}:{index}", keyboard.id));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn mode(&self) -> RuntimeMode {
+        RuntimeMode::Custom
     }
 }
 
@@ -221,6 +226,7 @@ mod tests {
             keyboard_configs: Vec::new(),
             mouse_configs: Vec::new(),
             custom_sequences: Vec::new(),
+            log_level: crate::config::LogLevel::Info,
             hotkeys: HotkeyConfig {
                 start: CapturedKey {
                     key_label: "F12".to_string(),
@@ -248,12 +254,9 @@ mod tests {
         MouseConfig {
             id: "m".to_string(),
             enabled,
-            action_type: MouseActionType::ClickLeft,
+            action_type: MouseActionType::Left,
             x,
             y,
-            scroll_delta: None,
-            drag_to_x: None,
-            drag_to_y: None,
             interval_ms: 20,
         }
     }
@@ -300,20 +303,14 @@ mod tests {
 
     #[test]
     fn running_status_matches_mode() {
-        assert_eq!(
-            KeyboardSequenceBuilder.running_status(),
-            RuntimeStatus::RunningKeyboard
-        );
-        assert_eq!(
-            MouseSequenceBuilder.running_status(),
-            RuntimeStatus::RunningMouse
-        );
+        assert_eq!(KeyboardSequenceBuilder.mode(), RuntimeMode::Keyboard);
+        assert_eq!(MouseSequenceBuilder.mode(), RuntimeMode::Mouse);
         assert_eq!(
             CustomSequenceBuilder {
                 sequence_id: "x".to_string()
             }
-            .running_status(),
-            RuntimeStatus::RunningCustom
+            .mode(),
+            RuntimeMode::Custom
         );
     }
 
