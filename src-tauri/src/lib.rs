@@ -20,6 +20,18 @@ mod sound;
 mod sound_recorder;
 mod state;
 
+/// Parser-only entry points for fuzzing; they never touch files, devices, or global state.
+#[doc(hidden)]
+pub mod fuzzing {
+    pub fn config_bytes(input: &[u8]) {
+        super::config::fuzz_decode_bytes(input);
+    }
+
+    pub fn wav_bytes(input: &[u8]) {
+        super::sound::fuzz_validate_wav_bytes(input);
+    }
+}
+
 use config::LogLevel;
 use paths::PortablePaths;
 use state::{Activity, AppState, PageId, RuntimeHealth, SharedState, SimulationMode};

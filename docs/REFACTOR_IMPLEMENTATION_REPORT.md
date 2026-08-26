@@ -10,7 +10,7 @@
 
 旧共享停止标志、跨运行公共事件队列、`simulation_worker` 和 executor/scheduler 已删除。输入运行链路由单线程 Actor 独占驱动、计时、游标和按下账本。Stop 成功返回时旧运行已经终止且输入账本已释放；释放失败进入明确错误态。
 
-当前自动化基线为 49 项 Rust 单元/有界属性测试全部通过，前端生产构建和完整 release 发布链通过。最终门禁结果见第 4 节；真实驱动、UAC、麦克风、音频设备和延迟数据仍不得用自动测试替代。
+当前自动化基线为 54 项 Rust 单元/有界属性测试全部通过，前端生产构建和完整 release 发布链通过。最终门禁结果见第 4 节；真实驱动、UAC、麦克风、音频设备和延迟数据仍不得用自动测试替代。
 
 ## 2. 已完成改造
 
@@ -85,6 +85,10 @@
 
 - 512 组确定性任意 WAV 字节及所有截断前缀不得 panic。
 - 512 组确定性任意 INI 文本不得 panic。
+- 配置在候选写入/同步完成后的原子替换故障会保留旧文件并清理临时文件。
+- 音频文件发布失败不会切换内存候选；成功路径仅交换一次。
+- 独立变异 runner 对真实 INI/WAV 入口完成 500,000 次固定 seed 运行，112,517 cases/s，零 panic。
+- 每周 Windows CI 执行 2,000,000 次变异，失败时上传可复现 crash artifact。
 - 256 组、每组 256 步的活动获取/释放序列保持单所有者不变式。
 - 提权协议拒绝未知动作、错误版本、零/非法 PID、非法 nonce 和额外参数。
 - 固化哈希测试以真实临时文件证明：内容被篡改后，helper/安装器共用的校验函数失败关闭。
@@ -103,24 +107,22 @@
 | `cargo fmt --check` | 通过 |
 | `cargo check --all-targets --all-features` | 通过 |
 | `cargo clippy --all-targets --all-features -- -D warnings` | 通过，零警告 |
-| `cargo test --workspace --all-targets` | 通过，49 passed / 0 failed |
+| `cargo test --workspace --all-targets` | 通过，54 passed / 0 failed |
 | `npm run build` | 通过，61 modules |
+| `scripts/run-fuzz.ps1 -Iterations 500000` | 通过；固定 seed，500,000 cases，零 panic，112,517 cases/s |
 | `scripts/build-release.ps1` | 通过；主程序、helper、资源和打包副本哈希闭环通过 |
 | `git diff --check` | 通过；仅 CRLF 转换提示 |
 | Release helper 失败关闭 | 空参数和未知操作均退出 64，未进入 UAC 或维护动作；helper/打包副本 SHA-256 一致 |
-| CodeGraph | 已同步，67 files / 1,079 nodes / 2,861 edges |
+| CodeGraph | 已同步，69 files / 1,108 nodes / 2,958 edges |
 
 ## 5. 剩余发布门禁
 
 1. **Authenticode 发布链**：签名应用、helper 和安装器，定义证书保管、轮换、吊销和 CI 签名流程。
 2. **Windows 真机矩阵**：验证真实键鼠、Interception、同键启停、透传、UAC 取消/失败、安装/卸载/重启、麦克风占用/拒绝、音频设备缺失和播放延迟。
 3. **性能门禁**：测量 Stop P95 ≤ 100ms、最坏 ≤ 250ms；音频首播延迟由用户实测验收。
-4. **故障注入扩展**：配置写盘已有注入测试；仍需 Windows 文件占用、磁盘满、音频设备断开和前端 E2E 回滚场景。
-5. **持续 fuzz**：CI 已有确定性有界属性测试，但尚未建立 cargo-fuzz 语料库、定时任务和崩溃样本归档。
 
 ## 6. 下一步顺序
 
-1. 建立持续 fuzz 与故障注入回归，冻结候选构建。
-2. 在有证书的发布环境签名应用、helper 和安装器并验证发布方。
-3. 执行 Windows 真机与性能矩阵，记录设备、系统版本、驱动版本和结果。
-4. 将通过的签名、真机和性能证据回填本报告后，才能关闭 Phase 6～7。
+1. 在有证书的发布环境签名应用、helper 和安装器并验证发布方。
+2. 执行 Windows 真机与性能矩阵，记录设备、系统版本、驱动版本和结果。
+3. 将通过的签名、真机和性能证据回填本报告后，才能关闭 Phase 6～7。

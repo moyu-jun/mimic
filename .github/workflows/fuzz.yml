@@ -1,0 +1,29 @@
+name: Parser fuzz regression
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 19 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select stable Rust
+        shell: pwsh
+        run: rustup default stable
+      - name: Run bounded parser fuzzing
+        shell: pwsh
+        run: .scriptsun-fuzz.ps1 -Iterations 2000000
+      - name: Upload crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: parser-fuzz-artifacts
+          path: src-tauri/fuzz/artifacts/
+          if-no-files-found: ignore

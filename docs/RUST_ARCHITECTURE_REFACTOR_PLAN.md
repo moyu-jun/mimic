@@ -959,7 +959,7 @@ npm run build
 
 - [x] fmt、clippy、test、check、前端 build 全通过。
 - [x] Runtime 生命周期并发测试通过。
-- [x] WAV/config fuzz 或 property tests 通过。
+- [x] WAV/config fuzz 或 property tests 通过；固定 seed runner、语料、artifact 和每周 Windows CI 已建立。
 - [ ] Windows 手工矩阵通过。
 - [ ] 发布构建、签名和资源校验通过。
 - [x] 架构、错误码、线程所有权和运维文档已更新。

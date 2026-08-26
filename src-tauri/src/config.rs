@@ -459,6 +459,22 @@ fn decode_ini(ini: &Ini) -> Result<AppConfig, String> {
     })
 }
 
+/// Side-effect-free parser entry used by bounded and continuous fuzzing.
+pub(crate) fn fuzz_decode_bytes(input: &[u8]) {
+    if input.len() as u64 > MAX_CONFIG_FILE_BYTES {
+        return;
+    }
+    let Ok(text) = std::str::from_utf8(input) else {
+        return;
+    };
+    let Ok(ini) = Ini::load_from_str(text) else {
+        return;
+    };
+    if let Ok(config) = decode_ini(&ini) {
+        let _ = validate_config(&config);
+    }
+}
+
 fn required<'a>(value: Option<&'a str>, field: &str) -> Result<&'a str, String> {
     value.ok_or_else(|| format!("missing {field}"))
 }
@@ -488,6 +504,13 @@ pub fn save(config: &AppConfig) -> Result<(), String> {
 }
 
 fn save_to_path(config: &AppConfig, path: &Path) -> Result<(), String> {
+    save_to_path_with_replace(config, path, crate::paths::atomic_replace)
+}
+
+fn save_to_path_with_replace<F>(config: &AppConfig, path: &Path, replace: F) -> Result<(), String>
+where
+    F: FnOnce(&Path, &Path) -> Result<(), String>,
+{
     validate_config(config)?;
     crate::paths::ensure_regular_file_or_missing(path)?;
 
@@ -533,7 +556,7 @@ fn save_to_path(config: &AppConfig, path: &Path) -> Result<(), String> {
             ));
         }
         drop(file);
-        crate::paths::atomic_replace(&temporary, path)
+        replace(&temporary, path)
     })();
 
     if write_result.is_err() {
@@ -639,11 +662,7 @@ mod tests {
                 })
                 .collect();
 
-            if let Ok(ini) = Ini::load_from_str(&input) {
-                if let Ok(config) = decode_ini(&ini) {
-                    let _ = validate_config(&config);
-                }
-            }
+            assert!(std::panic::catch_unwind(|| fuzz_decode_bytes(input.as_bytes())).is_ok());
         }
     }
 
@@ -652,6 +671,43 @@ mod tests {
         *state ^= *state >> 7;
         *state ^= *state << 17;
         *state
+    }
+
+    #[test]
+    fn replace_failure_preserves_existing_config_and_cleans_candidate() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "mimic-config-fault-{}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let path = directory.join("mimic.ini");
+
+        save_to_path(&default_config(), &path).unwrap();
+        let original = std::fs::read(&path).unwrap();
+        let mut candidate = default_config();
+        candidate.keyboard_configs[0].interval_ms += 1;
+
+        let error = save_to_path_with_replace(&candidate, &path, |temporary, destination| {
+            assert!(temporary.is_file());
+            assert_eq!(destination, path);
+            Err("fault-injected replace failure".to_string())
+        })
+        .unwrap_err();
+
+        assert!(error.contains("fault-injected"));
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        let remaining: Vec<_> = std::fs::read_dir(&directory)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(remaining, vec![std::ffi::OsString::from("mimic.ini")]);
+
+        std::fs::remove_file(path).unwrap();
+        std::fs::remove_dir(directory).unwrap();
     }
 
     #[test]

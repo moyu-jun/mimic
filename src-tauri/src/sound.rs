@@ -14,6 +14,18 @@
 //   4. 无需 keepalive — 设备始终处于打开状态，无冷启动开销。
 //   5. 录制保存先预构建候选设备与缓冲，再原子发布文件并切换缓存。
 
+fn publish_candidate<T, F>(
+    slot: &mut Option<T>,
+    candidate: T,
+    replace_file: F,
+) -> Result<Option<T>, String>
+where
+    F: FnOnce() -> Result<(), String>,
+{
+    replace_file()?;
+    Ok(slot.replace(candidate))
+}
+
 #[cfg(windows)]
 mod inner {
     use std::collections::HashMap;
@@ -86,6 +98,10 @@ mod inner {
     }
 
     /// 从 wav 字节中解析格式信息和 PCM 数据位置。
+    pub(super) fn fuzz_validate(input: &[u8]) {
+        let _ = parse_wav(input);
+    }
+
     fn parse_wav(raw: &[u8]) -> Option<WavInfo> {
         if raw.len() < 12 || raw.get(0..4)? != b"RIFF" || raw.get(8..12)? != b"WAVE" {
             return None;
@@ -350,8 +366,9 @@ mod inner {
             .lock()
             .map_err(|_| "audio device lock poisoned".to_string())?;
 
-        crate::paths::atomic_replace(temporary, final_path)?;
-        let old = guard.replace(candidate);
+        let old = super::publish_candidate(&mut guard, candidate, || {
+            crate::paths::atomic_replace(temporary, final_path)
+        })?;
         drop(guard);
         drop(old);
         log::info!("[sound] committed file and cache for {}", file_name);
@@ -566,5 +583,44 @@ pub fn sound_files_exist() -> (bool, bool) {
     #[cfg(not(windows))]
     {
         (false, false)
+    }
+}
+/// Side-effect-free WAV parser entry used by bounded and continuous fuzzing.
+pub(crate) fn fuzz_validate_wav_bytes(input: &[u8]) {
+    #[cfg(windows)]
+    {
+        inner::fuzz_validate(input);
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = input;
+    }
+}
+
+#[cfg(test)]
+mod transaction_tests {
+    use super::publish_candidate;
+
+    #[test]
+    fn failed_file_publish_keeps_old_audio_candidate() {
+        let mut slot = Some("old");
+        let result = publish_candidate(&mut slot, "new", || {
+            Err("fault-injected audio replace failure".to_string())
+        });
+
+        assert_eq!(
+            result,
+            Err("fault-injected audio replace failure".to_string())
+        );
+        assert_eq!(slot, Some("old"));
+    }
+
+    #[test]
+    fn successful_file_publish_swaps_audio_candidate_once() {
+        let mut slot = Some("old");
+        let replaced = publish_candidate(&mut slot, "new", || Ok(())).unwrap();
+
+        assert_eq!(replaced, Some("old"));
+        assert_eq!(slot, Some("new"));
     }
 }

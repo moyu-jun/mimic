@@ -6,7 +6,11 @@ authors = ["you"]
 edition = "2021"
 
 [workspace]
-members = ["crates/elevation-protocol", "crates/elevated-helper"]
+members = [
+    "crates/elevation-protocol",
+    "crates/elevated-helper",
+    "crates/fuzz-runner",
+]
 resolver = "2"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html

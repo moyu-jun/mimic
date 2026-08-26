@@ -1,0 +1,8 @@
+[package]
+name = "mimic-fuzz-runner"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+mimic-lib = { package = "mimic", path = "../.." }
